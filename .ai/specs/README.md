@@ -7,6 +7,8 @@ See the [root specification index](https://github.com/thoughtkhoral/thought-khor
 ## Local areas
 
 - [What: deferred agent gateway](what/deferred-agent-gateway.md)
+- [What: A2A agent gateway foundation](what/a2a-agent-gateway-foundation.md)
 - [What: public documentation](what/public-documentation.md)
 - [How: specification-only boundary](how/specification-only.md)
+- [How: A2A agent gateway foundation design](how/a2a-agent-gateway-foundation.md)
 - [Decision 002: ThoughtKhoral project identity](decisions/002-thoughtkhoral-identity.md)
