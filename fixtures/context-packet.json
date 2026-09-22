@@ -21,9 +21,13 @@
       "actor": {"id": "85000000-0000-4000-8000-000000000001", "role": "human"},
       "eventId": "88000000-0000-4000-8000-000000000002",
       "eventType": "agent.task.requested",
+      "occurredAt": "2026-09-21T12:00:00Z",
       "payload": {
         "taskId": "84000000-0000-4000-8000-000000000001",
-        "input": "- Prepare rollout checklist | owner: Maya | due: Friday\n- malformed action item"
+        "agentId": "74686f75-6768-746b-686f-72616c000003",
+        "requesterId": "85000000-0000-4000-8000-000000000001",
+        "skillId": "summarize-context",
+        "contextRevision": 7
       },
       "roomId": "10000000-0000-4000-8000-000000000001",
       "sequence": 6
@@ -51,5 +55,5 @@
       "sourceEventIds": ["88000000-0000-4000-8000-000000000003"]
     }
   ],
-  "canonicalSha256": "b1af5552bba4a974e1e825ff08b88b9f1ceb4b91dc1ded593bbf1e1049094a35"
+  "canonicalSha256": "37a822e234a4ca997df801f68ab1cc6e29ce951d5b52fa55639f8a790d939cf6"
 }

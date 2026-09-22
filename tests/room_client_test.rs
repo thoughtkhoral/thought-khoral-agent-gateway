@@ -36,9 +36,7 @@ fn test_env() -> BTreeMap<String, String> {
             "THOUGHT_KHORAL_REFERENCE_AGENT_HANDOFF_HOST",
             "allowed.example",
         ),
-        ("THOUGHT_KHORAL_AGENT_LEASE_SECONDS", "120"),
         ("THOUGHT_KHORAL_AGENT_POLL_MILLIS", "1000"),
-        ("THOUGHT_KHORAL_AGENT_UPDATE_RATE_PER_MINUTE", "30"),
     ]
     .into_iter()
     .map(|(key, value)| (key.to_owned(), value.to_owned()))

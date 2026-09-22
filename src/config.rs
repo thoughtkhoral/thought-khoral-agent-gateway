@@ -68,15 +68,21 @@ pub struct GatewayConfig {
     room_gateway_origin: RoomGatewayOrigin,
     client_credentials: ClientCredentialsConfig,
     allowed_handoff_hosts: BTreeSet<String>,
-    lease_seconds: u64,
     poll_millis: u64,
-    update_rate_per_minute: u32,
 }
 
 impl GatewayConfig {
     /// Parses the deployment environment without reading a browser or user
     /// credential. The fixed reference-agent card is local-only.
     pub fn parse(environment: BTreeMap<String, String>) -> Result<Self, ConfigError> {
+        for key in [
+            "THOUGHT_KHORAL_AGENT_LEASE_SECONDS",
+            "THOUGHT_KHORAL_AGENT_UPDATE_RATE_PER_MINUTE",
+        ] {
+            if environment.contains_key(key) {
+                return Err(ConfigError::UnsupportedSetting(key));
+            }
+        }
         let room_gateway_origin = parse_trusted_room_gateway_origin(required(
             &environment,
             "THOUGHT_KHORAL_ROOM_GATEWAY_ORIGIN",
@@ -115,16 +121,8 @@ impl GatewayConfig {
             ));
         }
 
-        let lease_seconds =
-            parse_bounded_u64(&environment, "THOUGHT_KHORAL_AGENT_LEASE_SECONDS", 30, 300)?;
         let poll_millis =
             parse_bounded_u64(&environment, "THOUGHT_KHORAL_AGENT_POLL_MILLIS", 100, 5_000)?;
-        let update_rate_per_minute = parse_bounded_u64(
-            &environment,
-            "THOUGHT_KHORAL_AGENT_UPDATE_RATE_PER_MINUTE",
-            1,
-            60,
-        )? as u32;
 
         Ok(Self {
             room_gateway_origin,
@@ -134,9 +132,7 @@ impl GatewayConfig {
                 client_secret: client_secret.to_owned(),
             },
             allowed_handoff_hosts,
-            lease_seconds,
             poll_millis,
-            update_rate_per_minute,
         })
     }
 
@@ -152,16 +148,8 @@ impl GatewayConfig {
         &self.allowed_handoff_hosts
     }
 
-    pub fn lease_seconds(&self) -> u64 {
-        self.lease_seconds
-    }
-
     pub fn poll_millis(&self) -> u64 {
         self.poll_millis
-    }
-
-    pub fn update_rate_per_minute(&self) -> u32 {
-        self.update_rate_per_minute
     }
 
     pub(crate) fn client_credentials(&self) -> &ClientCredentialsConfig {
@@ -171,6 +159,10 @@ impl GatewayConfig {
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    #[error(
+        "{0} is unsupported; lease duration is broker-owned and progress has a fixed three-update bound"
+    )]
+    UnsupportedSetting(&'static str),
     #[error("required configuration {0} is missing")]
     Missing(&'static str),
     #[error("room gateway origin is not one of the reviewed internal authorities")]

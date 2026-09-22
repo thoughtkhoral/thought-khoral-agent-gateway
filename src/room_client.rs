@@ -189,6 +189,7 @@ fn secure_http_client() -> Result<Client, RoomClientError> {
         .no_proxy()
         // A redirect could move a workload bearer token to another origin.
         .redirect(Policy::none())
+        .timeout(std::time::Duration::from_secs(5))
         .build()
         .map_err(RoomClientError::from)
 }
@@ -206,6 +207,17 @@ pub enum RoomClientError {
     EmptyServiceToken,
     #[error("HTTP client request failed")]
     Http(#[from] reqwest::Error),
+}
+
+impl RoomClientError {
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Http(error) => error.status().is_none_or(|status| {
+                status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS
+            }),
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]

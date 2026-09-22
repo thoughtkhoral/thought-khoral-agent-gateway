@@ -1,0 +1,12 @@
+{
+  "contract": "n2n.room.v1",
+  "source": "https://github.com/thoughtkhoral/thought-khoral-contracts",
+  "tag": null,
+  "commit": "1a44b6cfc19a4f5e668afb1ddb5241b2a0f1f72d",
+  "archiveSha256": "5074d1c33bf66123724d37bef5fca96992aa792e5650f0597c3c8e6b93ca72e2",
+  "schemas": {
+    "envelope.schema.json": "6e24a837d1f0c6e2ff4e84e0b86b02161a1b51efaa219891e2cb9fc0a1f4c438",
+    "rpc.schema.json": "6febf984e488aab51d146f7ebc667998878e5b2a57cca4ac9b35b9e44050942e",
+    "room-event.schema.json": "7f7a9c1fe98b47144faf6123dc35d676b5cb651fb4674df6777503134fb0e88b"
+  }
+}

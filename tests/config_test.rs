@@ -3,6 +3,21 @@ use std::collections::BTreeMap;
 use thought_khoral_agent_gateway::GatewayConfig;
 
 #[test]
+fn unsupported_lease_and_rate_settings_are_rejected() {
+    for key in [
+        "THOUGHT_KHORAL_AGENT_LEASE_SECONDS",
+        "THOUGHT_KHORAL_AGENT_UPDATE_RATE_PER_MINUTE",
+    ] {
+        let mut environment = test_env("http://127.0.0.1:9090", "allowed.example");
+        environment.insert(key.to_owned(), "60".to_owned());
+        assert!(
+            GatewayConfig::parse(environment).is_err(),
+            "{key} must not imply an unimplemented control"
+        );
+    }
+}
+
+#[test]
 fn config_rejects_non_loopback_agent_or_unallowlisted_handoff_host() {
     assert!(
         GatewayConfig::parse(test_env("https://remote-agent.invalid", "allowed.example")).is_err()
@@ -45,9 +60,7 @@ fn config_requires_service_credentials_and_short_operational_limits() {
         config.room_gateway_origin().as_str(),
         "http://127.0.0.1:8080/"
     );
-    assert_eq!(config.lease_seconds(), 120);
     assert_eq!(config.poll_millis(), 1_000);
-    assert_eq!(config.update_rate_per_minute(), 30);
     assert!(config.allowed_handoff_hosts().contains("allowed.example"));
 }
 
@@ -112,9 +125,7 @@ fn test_env(card_url: &str, selected_handoff_host: &str) -> BTreeMap<String, Str
             "THOUGHT_KHORAL_REFERENCE_AGENT_HANDOFF_HOST",
             selected_handoff_host,
         ),
-        ("THOUGHT_KHORAL_AGENT_LEASE_SECONDS", "120"),
         ("THOUGHT_KHORAL_AGENT_POLL_MILLIS", "1000"),
-        ("THOUGHT_KHORAL_AGENT_UPDATE_RATE_PER_MINUTE", "30"),
     ]
     .into_iter()
     .map(|(key, value)| (key.to_owned(), value.to_owned()))

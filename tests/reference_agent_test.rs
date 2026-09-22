@@ -12,6 +12,52 @@ fn packet() -> RoomContextPacket {
         .expect("fixture must be a room context packet")
 }
 
+#[test]
+fn authoritative_packet_input_executes_without_a_contract_invalid_event_input() {
+    let mut packet = packet();
+    packet.skill_id = "extract-action-items".to_owned();
+    packet.events[1]["payload"] = serde_json::json!({
+        "taskId": packet.task_id, "agentId": packet.agent_id,
+        "requesterId": packet.requester_id, "skillId": packet.skill_id,
+        "contextRevision": packet.context_revision,
+    });
+    packet.canonical_sha256 = canonical_packet_sha256(&packet).unwrap();
+    let stream = stream_for_packet(&packet).expect("broker packets carry input in task storage");
+    assert_eq!(
+        completed_result(&stream[3])["actionItems"][0]["text"],
+        "Prepare rollout checklist"
+    );
+}
+
+#[test]
+fn large_room_summary_stays_within_the_published_bounds() {
+    let mut packet = packet();
+    for index in 10..250_u128 {
+        let mut event = packet.events[0].clone();
+        event["eventId"] = serde_json::json!(uuid::Uuid::from_u128(index));
+        packet.events.push(event);
+    }
+    packet.active_decisions = (0..200)
+        .map(|_| {
+            let mut decision = packet.active_decisions[0].clone();
+            decision.title = "決".repeat(500);
+            decision
+        })
+        .collect();
+    packet.canonical_sha256 = canonical_packet_sha256(&packet).unwrap();
+    let stream = stream_for_packet(&packet).unwrap();
+    let result = completed_result(&stream[3]);
+    assert!(result["citations"].as_array().unwrap().len() <= 100);
+    assert!(result["summary"].as_str().unwrap().chars().count() <= 8000);
+    assert!(
+        result["summary"]
+            .as_str()
+            .unwrap()
+            .contains("200 active decisions")
+    );
+    assert_eq!(stream, stream_for_packet(&packet).unwrap());
+}
+
 // A change that emits a non-A2A stream, changes the fixed progress wording, or
 // derives the summary from message contents rather than the authorized packet
 // metadata must make this fail.
@@ -106,6 +152,7 @@ fn reference_agent_rejects_tampered_and_expired_packets_before_execution() {
 fn extract_action_items_accepts_only_the_strict_line_grammar_and_cites_invocation() {
     let mut packet = packet();
     packet.skill_id = "extract-action-items".to_owned();
+    packet.events[1]["payload"]["skillId"] = serde_json::json!(packet.skill_id);
     packet.canonical_sha256 = canonical_packet_sha256(&packet).expect("mutated fixture must hash");
 
     let stream = stream_for_packet(&packet).expect("valid action-item packet must execute");
@@ -142,7 +189,7 @@ fn extract_action_items_rejects_whitespace_variants_of_the_literal_grammar() {
         .iter_mut()
         .find(|event| event["eventType"] == "agent.task.requested")
         .expect("fixture has task invocation");
-    invocation["payload"]["input"] = serde_json::json!(packet.input);
+    invocation["payload"]["skillId"] = serde_json::json!(packet.skill_id);
     packet.canonical_sha256 = canonical_packet_sha256(&packet).unwrap();
 
     let stream = stream_for_packet(&packet).expect("packet itself remains authorized");

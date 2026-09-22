@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         room_gateway,
         adapter,
         Uuid::new_v4(),
-        Duration::from_secs((60 / u64::from(config.update_rate_per_minute())).max(1)),
+        Duration::from_secs(1),
     );
     loop {
         dispatcher.run_once().await?;

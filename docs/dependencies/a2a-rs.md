@@ -31,6 +31,12 @@ separately recorded in the table above.
 
 ## Review evidence
 
+The client is now vendored via `[patch.crates-io]` so limits can be enforced
+before the official SSE parser allocates unbounded frames or ignores comment
+floods. See [patch provenance](../../vendor/a2a-client-lf/THOUGHT-KHORAL-PATCH.md)
+for the exact published source checksum, retained Apache license, and local
+changes. Core and optional server remain the exact published dependencies.
+
 - **Official source and release:** `git ls-remote --tags
   https://github.com/a2aproject/a2a-rs.git a2a-client-lf-v0.2.3
   a2a-lf-v0.3.0`, run 2026-09-22, returned the commits above. The source

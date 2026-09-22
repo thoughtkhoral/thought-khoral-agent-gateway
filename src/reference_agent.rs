@@ -144,7 +144,16 @@ pub fn verify_packet_at(packet: &RoomContextPacket, now: DateTime<Utc>) -> Resul
     }
 
     let invocation = invocation_event(packet).ok_or(PacketError::MissingInvocation)?;
-    if invocation.pointer("/payload/input").and_then(Value::as_str) != Some(packet.input.as_str()) {
+    if packet.input.trim().is_empty()
+        || packet.input.chars().count() > 8000
+        || invocation["roomId"] != json!(packet.room_id)
+        || invocation["actor"]["role"] != "human"
+        || invocation["actor"]["id"] != json!(packet.requester_id)
+        || invocation["payload"]["agentId"] != json!(packet.agent_id)
+        || invocation["payload"]["requesterId"] != json!(packet.requester_id)
+        || invocation["payload"]["skillId"] != json!(packet.skill_id)
+        || invocation["payload"]["contextRevision"] != json!(packet.context_revision)
+    {
         return Err(PacketError::InvocationMismatch);
     }
     Ok(())
@@ -353,6 +362,18 @@ fn summary_result(packet: &RoomContextPacket) -> Value {
         .count();
     let titles = if packet.active_decisions.is_empty() {
         "none".to_owned()
+    } else if packet.active_decisions.len() > 20
+        || packet
+            .active_decisions
+            .iter()
+            .map(|decision| decision.title.chars().count() + 2)
+            .sum::<usize>()
+            > 7000
+    {
+        format!(
+            "{} active decisions (titles omitted to keep the result bounded)",
+            packet.active_decisions.len()
+        )
     } else {
         packet
             .active_decisions
@@ -365,6 +386,7 @@ fn summary_result(packet: &RoomContextPacket) -> Value {
         .events
         .iter()
         .filter_map(|event| event.get("eventId").and_then(Value::as_str))
+        .take(100)
         .collect::<Vec<_>>();
     json!({
         "kind": "context-summary.v1",
@@ -378,11 +400,8 @@ fn summary_result(packet: &RoomContextPacket) -> Value {
 
 fn action_items_result(packet: &RoomContextPacket) -> Result<Value, PacketError> {
     let invocation = invocation_event(packet).ok_or(PacketError::MissingInvocation)?;
-    let input = invocation
-        .pointer("/payload/input")
-        .and_then(Value::as_str)
-        .ok_or(PacketError::InvocationMismatch)?;
-    let action_items = input
+    let action_items = packet
+        .input
         .lines()
         .filter_map(parse_action_item)
         .take(20)

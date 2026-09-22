@@ -24,6 +24,163 @@ fn packet() -> RoomContextPacket {
         .expect("fixture must be a room context packet")
 }
 
+#[test]
+fn contract_validation_uses_the_vendored_hash_locked_artifact() {
+    use sha2::{Digest, Sha256};
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("contracts");
+    let lock: Value = serde_json::from_slice(
+        &std::fs::read(root.join("lock.json"))
+            .expect("contract must be vendored in this repository"),
+    )
+    .unwrap();
+    for name in [
+        "room-event.schema.json",
+        "envelope.schema.json",
+        "rpc.schema.json",
+    ] {
+        let bytes = std::fs::read(root.join("n2n.room.v1/schemas").join(name)).unwrap();
+        assert_eq!(
+            format!("{:x}", Sha256::digest(bytes)),
+            lock["schemas"][name]
+        );
+    }
+}
+
+#[tokio::test]
+async fn renewed_leases_replay_identical_update_timestamps_and_ids() {
+    let first = packet();
+    let mut renewed = first.clone();
+    renewed.issued_at += Duration::seconds(60);
+    renewed.expires_at += Duration::seconds(60);
+    renewed.canonical_sha256 = canonical_packet_sha256(&renewed).unwrap();
+    let mut outputs = Vec::new();
+    for packet in [first, renewed] {
+        let broker = RecordingBroker::new(packet.clone());
+        let runner = FixedRunner::new(
+            A2aTaskEvent::from_stream(&packet, stream_for_packet(&packet).unwrap()).unwrap(),
+        );
+        Dispatcher::new(broker.clone(), runner, Uuid::new_v4(), StdDuration::ZERO)
+            .run_once()
+            .await
+            .unwrap();
+        outputs.push(broker.updates().await);
+    }
+    for (first, renewed) in outputs[0].iter().zip(&outputs[1]) {
+        assert_same_normalized_update(first, renewed);
+    }
+}
+
+#[tokio::test]
+async fn deterministic_rejection_is_not_retried_and_becomes_a_terminal_failure() {
+    let packet = packet();
+    let mut broker = RecordingBroker::new(packet.clone());
+    broker.reject_success = true;
+    let runner = FixedRunner::new(
+        A2aTaskEvent::from_stream(&packet, stream_for_packet(&packet).unwrap()).unwrap(),
+    );
+    let dispatcher = Dispatcher::new(
+        broker.clone(),
+        runner,
+        Uuid::new_v4(),
+        StdDuration::from_millis(10),
+    );
+    tokio::time::timeout(StdDuration::from_millis(500), dispatcher.run_once())
+        .await
+        .expect("a deterministic 422 must terminate promptly")
+        .unwrap();
+    assert_eq!(
+        broker
+            .attempts()
+            .await
+            .iter()
+            .filter(|request| request.update.event_type == "agent.task.succeeded")
+            .count(),
+        1
+    );
+    assert_eq!(
+        broker.updates().await.last().unwrap().update.event_type,
+        "agent.task.failed"
+    );
+}
+
+#[tokio::test]
+async fn hanging_runner_is_cancelled_before_lease_expiry() {
+    struct HangingRunner;
+    #[async_trait]
+    impl A2aTaskRunner for HangingRunner {
+        type Error = std::convert::Infallible;
+        async fn invoke(&self, _: &RoomContextPacket) -> Result<Vec<A2aTaskEvent>, Self::Error> {
+            std::future::pending().await
+        }
+    }
+    let mut packet = packet();
+    packet.issued_at = Utc::now();
+    packet.expires_at = Utc::now() + Duration::seconds(3);
+    packet.canonical_sha256 = canonical_packet_sha256(&packet).unwrap();
+    let broker = RecordingBroker::new(packet);
+    let dispatcher = Dispatcher::new(
+        broker.clone(),
+        HangingRunner,
+        Uuid::new_v4(),
+        StdDuration::ZERO,
+    );
+    tokio::time::timeout(StdDuration::from_secs(2), dispatcher.run_once())
+        .await
+        .expect("lease-aware deadline must leave time to persist failure")
+        .unwrap();
+    assert_eq!(
+        broker.updates().await.last().unwrap().update.event_type,
+        "agent.task.failed"
+    );
+}
+
+#[tokio::test]
+async fn progress_is_persisted_while_the_agent_stream_is_still_open() {
+    struct StreamingRunner(RecordingBroker);
+    #[async_trait]
+    impl A2aTaskRunner for StreamingRunner {
+        type Error = std::convert::Infallible;
+        async fn invoke(&self, _: &RoomContextPacket) -> Result<Vec<A2aTaskEvent>, Self::Error> {
+            panic!("dispatcher must consume the incremental stream");
+        }
+        async fn invoke_stream(
+            &self,
+            packet: &RoomContextPacket,
+            sender: tokio::sync::mpsc::Sender<A2aTaskEvent>,
+        ) -> Result<(), Self::Error> {
+            let events =
+                A2aTaskEvent::from_stream(packet, stream_for_packet(packet).unwrap()).unwrap();
+            sender.send(events[0].clone()).await.unwrap();
+            tokio::time::timeout(StdDuration::from_millis(500), async {
+                while self.0.updates().await.is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("accepted progress must reach the broker before stream completion");
+            for event in events.into_iter().skip(1) {
+                sender.send(event).await.unwrap();
+            }
+            Ok(())
+        }
+    }
+    let broker = RecordingBroker::new(packet());
+    let outcome = Dispatcher::new(
+        broker.clone(),
+        StreamingRunner(broker.clone()),
+        Uuid::new_v4(),
+        StdDuration::ZERO,
+    )
+    .run_once()
+    .await
+    .unwrap();
+    assert_eq!(outcome.submitted_updates, 4);
+    assert_eq!(
+        broker.updates().await.last().unwrap().update.event_type,
+        "agent.task.succeeded"
+    );
+}
+
 // This catches non-idempotent update identifiers, skipping the required
 // context reread, changed event ordering, and duplicate meaningful progress.
 #[tokio::test]
@@ -82,7 +239,7 @@ async fn dispatcher_claims_fetches_and_emits_one_ordered_normalized_terminal_str
 // This catches forwarding a malformed agent result to the room gateway. A
 // leased task must receive only the contract-safe terminal failure.
 #[tokio::test]
-async fn invalid_agent_response_creates_only_a_safe_terminal_failure() {
+async fn invalid_terminal_response_preserves_admitted_progress_and_emits_safe_failure() {
     let packet = packet();
     let broker = RecordingBroker::new(packet.clone());
     let mut events =
@@ -104,10 +261,15 @@ async fn invalid_agent_response_creates_only_a_safe_terminal_failure() {
         .await
         .expect("safe failure must be submitted");
     let updates = broker.updates().await;
-    assert_eq!(updates.len(), 1);
-    assert_eq!(updates[0].update.event_type, "agent.task.failed");
+    assert_eq!(updates.len(), 4);
+    assert!(
+        updates[..3]
+            .iter()
+            .all(|update| update.update.event_type == "agent.task.progressed")
+    );
+    assert_eq!(updates[3].update.event_type, "agent.task.failed");
     assert_eq!(
-        updates[0].update.payload["failure"]["code"],
+        updates[3].update.payload["failure"]["code"],
         "execution_failed"
     );
 }
@@ -218,7 +380,12 @@ async fn emitted_failed_updates_validate_against_the_pinned_room_event_schema() 
 }
 
 async fn only_failed_update(broker: &RecordingBroker) -> TaskUpdateRequest {
-    let updates = broker.updates().await;
+    let updates = broker
+        .updates()
+        .await
+        .into_iter()
+        .filter(|update| update.update.event_type == "agent.task.failed")
+        .collect::<Vec<_>>();
     assert_eq!(updates.len(), 1);
     assert_eq!(updates[0].update.event_type, "agent.task.failed");
     updates.into_iter().next().unwrap()
@@ -226,11 +393,11 @@ async fn only_failed_update(broker: &RecordingBroker) -> TaskUpdateRequest {
 
 fn pinned_room_event_validator() -> jsonschema::Validator {
     let schema: Value = serde_json::from_str(include_str!(
-        "../../thought-khoral-contracts/schemas/room-event.schema.json"
+        "../contracts/n2n.room.v1/schemas/room-event.schema.json"
     ))
     .expect("pinned room-event schema must be valid JSON");
     let envelope: Value = serde_json::from_str(include_str!(
-        "../../thought-khoral-contracts/schemas/envelope.schema.json"
+        "../contracts/n2n.room.v1/schemas/envelope.schema.json"
     ))
     .expect("pinned envelope schema must be valid JSON");
     jsonschema::options()
@@ -373,6 +540,7 @@ fn handoff_is_data_only_and_must_be_bound_unexpired_https_and_allowlisted() {
 
 #[derive(Clone)]
 struct RecordingBroker {
+    reject_success: bool,
     context: ContextResponse,
     fetch_count: Arc<Mutex<usize>>,
     updates: Arc<Mutex<Vec<TaskUpdateRequest>>>,
@@ -389,6 +557,7 @@ struct RecordingBrokerState {
 impl RecordingBroker {
     fn new(packet: RoomContextPacket) -> Self {
         Self {
+            reject_success: false,
             context: ContextResponse {
                 lease_token: Uuid::from_u128(0x72000000000040008000000000000001),
                 packet,
@@ -433,6 +602,9 @@ impl RecordingBroker {
 #[async_trait]
 impl RoomTaskBroker for RecordingBroker {
     type Error = RecordingBrokerError;
+    fn retryable(&self, error: &Self::Error) -> bool {
+        matches!(error, RecordingBrokerError::ResponseLost)
+    }
 
     async fn claim(&self, _request: ClaimRequest) -> Result<Option<ContextResponse>, Self::Error> {
         let mut state = self.state.lock().await;
@@ -460,6 +632,9 @@ impl RoomTaskBroker for RecordingBroker {
         request: TaskUpdateRequest,
     ) -> Result<TaskUpdateResponse, Self::Error> {
         self.attempts.lock().await.push(request.clone());
+        if self.reject_success && request.update.event_type == "agent.task.succeeded" {
+            return Err(RecordingBrokerError::Rejected);
+        }
 
         let mut accepted = self.updates.lock().await;
         if let Some(existing) = accepted
@@ -505,6 +680,7 @@ fn same_request(left: &TaskUpdateRequest, right: &TaskUpdateRequest) -> bool {
 
 #[derive(Debug)]
 enum RecordingBrokerError {
+    Rejected,
     ResponseLost,
     ConflictingDuplicate,
 }
@@ -512,6 +688,7 @@ enum RecordingBrokerError {
 impl fmt::Display for RecordingBrokerError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Rejected => formatter.write_str("422 unprocessable entity"),
             Self::ResponseLost => formatter.write_str("response was lost after persistence"),
             Self::ConflictingDuplicate => formatter.write_str("duplicate differs from original"),
         }

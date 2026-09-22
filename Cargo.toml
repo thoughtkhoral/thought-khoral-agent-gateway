@@ -33,6 +33,9 @@ http-body-util = "0.1"
 jsonschema = { version = "=0.42.2", default-features = false }
 tower = { version = "0.5", features = ["util"] }
 
+[patch.crates-io]
+a2a-client-lf = { path = "vendor/a2a-client-lf" }
+
 [[bin]]
 name = "thought-khoral-reference-agent"
 path = "src/bin/thought-khoral-reference-agent.rs"

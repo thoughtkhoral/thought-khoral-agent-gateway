@@ -21,6 +21,9 @@ const UPDATE_NAMESPACE: Uuid = Uuid::from_u128(0x74686f756768746b_686f72616c0000
 #[async_trait]
 pub trait RoomTaskBroker: Send + Sync {
     type Error: Error + Send + Sync + 'static;
+    fn retryable(&self, _error: &Self::Error) -> bool {
+        true
+    }
 
     async fn claim(&self, request: ClaimRequest) -> Result<Option<ContextResponse>, Self::Error>;
     async fn fetch_context(
@@ -39,6 +42,9 @@ pub trait RoomTaskBroker: Send + Sync {
 #[async_trait]
 impl RoomTaskBroker for RoomGatewayClient {
     type Error = crate::RoomClientError;
+    fn retryable(&self, error: &Self::Error) -> bool {
+        error.is_retryable()
+    }
 
     async fn claim(&self, request: ClaimRequest) -> Result<Option<ContextResponse>, Self::Error> {
         RoomGatewayClient::claim(self, request).await
@@ -67,6 +73,18 @@ pub trait A2aTaskRunner: Send + Sync {
     type Error: Error + Send + Sync + 'static;
 
     async fn invoke(&self, packet: &RoomContextPacket) -> Result<Vec<A2aTaskEvent>, Self::Error>;
+    async fn invoke_stream(
+        &self,
+        packet: &RoomContextPacket,
+        sender: tokio::sync::mpsc::Sender<A2aTaskEvent>,
+    ) -> Result<(), Self::Error> {
+        for event in self.invoke(packet).await? {
+            if sender.send(event).await.is_err() {
+                break;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -75,6 +93,13 @@ impl A2aTaskRunner for A2aAdapter {
 
     async fn invoke(&self, packet: &RoomContextPacket) -> Result<Vec<A2aTaskEvent>, Self::Error> {
         A2aAdapter::invoke(self, packet).await
+    }
+    async fn invoke_stream(
+        &self,
+        packet: &RoomContextPacket,
+        sender: tokio::sync::mpsc::Sender<A2aTaskEvent>,
+    ) -> Result<(), Self::Error> {
+        A2aAdapter::invoke_stream(self, packet, sender).await
     }
 }
 
@@ -94,6 +119,8 @@ pub struct DispatchOutcome {
 pub enum DispatchError {
     #[error("room task broker operation failed")]
     Broker,
+    #[error("room task broker rejected the update permanently")]
+    Rejected,
     #[error("local A2A invocation failed")]
     A2a,
 }
@@ -197,28 +224,43 @@ where
                 .await;
         }
 
-        let events = match self.a2a.invoke(&packet).await {
-            Ok(events) => events,
-            Err(_) => {
+        let remaining = (packet.expires_at - Utc::now() - chrono::Duration::seconds(2))
+            .to_std()
+            .unwrap_or(Duration::ZERO)
+            .min(Duration::from_secs(10));
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let invocation = tokio::time::timeout(remaining, self.a2a.invoke_stream(&packet, sender));
+        tokio::pin!(invocation);
+        let mut invocation_done = false;
+        let mut received = 0;
+        let mut terminal = None;
+        let mut submitted_updates = 0;
+        loop {
+            let event = tokio::select! {
+                result = &mut invocation, if !invocation_done => {
+                    if !matches!(result, Ok(Ok(()))) {
+                        return self.submit_failure(&packet, lease_token, TerminalFailure::LocalA2aInvocation, received).await;
+                    }
+                    invocation_done = true;
+                    continue;
+                }
+                event = receiver.recv() => match event {
+                    Some(event) => event,
+                    None => break,
+                }
+            };
+            if !validate_agent_event(&packet, &event, received) {
                 return self
-                    .submit_failure(&packet, lease_token, TerminalFailure::LocalA2aInvocation, 0)
+                    .submit_failure(
+                        &packet,
+                        lease_token,
+                        TerminalFailure::A2aResponseAdmission,
+                        received,
+                    )
                     .await;
             }
-        };
-        if !validate_agent_events(&packet, &events) {
-            return self
-                .submit_failure(
-                    &packet,
-                    lease_token,
-                    TerminalFailure::A2aResponseAdmission,
-                    0,
-                )
-                .await;
-        }
-
-        let mut submitted_updates = 0;
-        for event in events {
-            match event {
+            received += 1;
+            let result = match event {
                 A2aTaskEvent::Submitted { ordinal } => {
                     self.submit_progress(
                         &packet,
@@ -227,23 +269,66 @@ where
                         "accepted",
                         "Task submitted",
                     )
-                    .await?;
-                    submitted_updates += 1;
+                    .await
                 }
                 A2aTaskEvent::Working { ordinal, text } => {
                     self.submit_progress(&packet, lease_token, ordinal, "working", &text)
-                        .await?;
-                    submitted_updates += 1;
+                        .await
                 }
                 A2aTaskEvent::Completed {
                     ordinal, result, ..
                 } => {
-                    self.submit_success(&packet, lease_token, ordinal, result)
-                        .await?;
-                    submitted_updates += 1;
+                    terminal = Some((ordinal, result));
+                    continue;
                 }
+            };
+            if result.is_err() {
+                return self
+                    .submit_failure(
+                        &packet,
+                        lease_token,
+                        TerminalFailure::A2aResponseAdmission,
+                        received,
+                    )
+                    .await;
             }
+            submitted_updates += 1;
         }
+        if !invocation_done && !matches!(invocation.await, Ok(Ok(()))) {
+            return self
+                .submit_failure(
+                    &packet,
+                    lease_token,
+                    TerminalFailure::LocalA2aInvocation,
+                    received,
+                )
+                .await;
+        }
+        let Some((ordinal, result)) = terminal.filter(|_| received == 4) else {
+            return self
+                .submit_failure(
+                    &packet,
+                    lease_token,
+                    TerminalFailure::A2aResponseAdmission,
+                    received,
+                )
+                .await;
+        };
+        if self
+            .submit_success(&packet, lease_token, ordinal, result)
+            .await
+            .is_err()
+        {
+            return self
+                .submit_failure(
+                    &packet,
+                    lease_token,
+                    TerminalFailure::A2aResponseAdmission,
+                    received,
+                )
+                .await;
+        }
+        submitted_updates += 1;
         Ok(DispatchOutcome { submitted_updates })
     }
 
@@ -328,13 +413,21 @@ where
             if Utc::now() >= packet.expires_at {
                 return Err(DispatchError::Broker);
             }
-            if self
-                .broker
-                .submit_update(packet.task_id, lease_token, request.clone())
-                .await
-                .is_ok()
+            let remaining = (packet.expires_at - Utc::now())
+                .to_std()
+                .unwrap_or(Duration::ZERO);
+            match tokio::time::timeout(
+                remaining.min(Duration::from_secs(5)),
+                self.broker
+                    .submit_update(packet.task_id, lease_token, request.clone()),
+            )
+            .await
             {
-                return Ok(());
+                Ok(Ok(_)) => return Ok(()),
+                Ok(Err(error)) if !self.broker.retryable(&error) => {
+                    return Err(DispatchError::Rejected);
+                }
+                _ => {}
             }
 
             if self.retry_interval.is_zero() {
@@ -355,37 +448,42 @@ pub fn deterministic_update_id(task_id: Uuid, ordinal: u64, kind: &str) -> Uuid 
 
 fn update_occurred_at(packet: &RoomContextPacket, ordinal: u64) -> DateTime<Utc> {
     let milliseconds = ordinal.min(i64::MAX as u64) as i64;
-    packet
-        .issued_at
+    // Invocation time survives lease renewal; packet issue time does not.
+    let invoked_at = packet
+        .events
+        .iter()
+        .find(|event| {
+            event["eventType"] == "agent.task.requested"
+                && event["payload"]["taskId"] == json!(packet.task_id)
+        })
+        .and_then(|event| event["occurredAt"].as_str())
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|time| time.with_timezone(&Utc))
+        .unwrap_or(packet.issued_at);
+    invoked_at
         .checked_add_signed(chrono::Duration::milliseconds(milliseconds))
-        .unwrap_or(packet.issued_at)
+        .unwrap_or(invoked_at)
 }
 
-fn validate_agent_events(packet: &RoomContextPacket, events: &[A2aTaskEvent]) -> bool {
-    let [
-        A2aTaskEvent::Submitted { ordinal: 0 },
-        A2aTaskEvent::Working {
-            ordinal: 1,
-            text: first,
-        },
-        A2aTaskEvent::Working {
-            ordinal: 2,
-            text: second,
-        },
+fn validate_agent_event(packet: &RoomContextPacket, event: &A2aTaskEvent, ordinal: u64) -> bool {
+    if event.ordinal() != ordinal {
+        return false;
+    }
+    match event {
+        A2aTaskEvent::Submitted { ordinal: 0 } => true,
+        A2aTaskEvent::Working { ordinal: 1, text } => text == "Reading authorized room context",
+        A2aTaskEvent::Working { ordinal: 2, text } => text == "Preparing cited result",
         A2aTaskEvent::Completed {
             ordinal: 3,
             result,
             binding,
-        },
-    ] = events
-    else {
-        return false;
-    };
-    first == "Reading authorized room context"
-        && second == "Preparing cited result"
-        && binding.task_id == packet.task_id
-        && binding.room_id == packet.room_id
-        && binding.context_revision == packet.context_revision
-        && binding.canonical_sha256 == packet.canonical_sha256
-        && validate_result(packet, result).is_ok()
+        } => {
+            binding.task_id == packet.task_id
+                && binding.room_id == packet.room_id
+                && binding.context_revision == packet.context_revision
+                && binding.canonical_sha256 == packet.canonical_sha256
+                && validate_result(packet, result).is_ok()
+        }
+        _ => false,
+    }
 }

@@ -5,8 +5,6 @@ version = 4
 [[package]]
 name = "a2a-client-lf"
 version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab51522c48871829447ee296d65f98918a93891440d31dedd9800145cbaad159"
 dependencies = [
  "a2a-lf",
  "a2a-pb",

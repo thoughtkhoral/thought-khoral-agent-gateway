@@ -114,6 +114,24 @@ impl A2aAdapter {
         &self,
         packet: &RoomContextPacket,
     ) -> Result<Vec<A2aTaskEvent>, A2aAdapterError> {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let collect = async {
+            let mut events = Vec::new();
+            while let Some(event) = receiver.recv().await {
+                events.push(event);
+            }
+            events
+        };
+        let (result, events) = tokio::join!(self.invoke_stream(packet, sender), collect);
+        result?;
+        Ok(events)
+    }
+
+    pub async fn invoke_stream(
+        &self,
+        packet: &RoomContextPacket,
+        sender: tokio::sync::mpsc::Sender<A2aTaskEvent>,
+    ) -> Result<(), A2aAdapterError> {
         verify_packet(packet).map_err(|_| A2aAdapterError::InvalidPacket)?;
         let mut message = Message::new(
             Role::User,
@@ -143,15 +161,27 @@ impl A2aAdapter {
         params.insert("A2A-Version".to_owned(), vec![a2a::VERSION.to_owned()]);
         let transport =
             JsonRpcTransport::new(local_http_client()?, REFERENCE_AGENT_ENDPOINT.to_owned());
-        let stream = transport
+        let mut stream = transport
             .send_streaming_message(&params, &request)
             .await
             .map_err(|_| A2aAdapterError::Transport)?;
-        let events = stream
-            .try_collect::<Vec<_>>()
+        let mut ordinal = 0;
+        while let Some(event) = stream
+            .try_next()
             .await
-            .map_err(|_| A2aAdapterError::InvalidResponse)?;
-        Self::validate_stream(packet, events)
+            .map_err(|_| A2aAdapterError::InvalidResponse)?
+        {
+            let event = Self::validate_event(packet, &event, ordinal)?;
+            sender
+                .send(event)
+                .await
+                .map_err(|_| A2aAdapterError::Transport)?;
+            ordinal += 1;
+        }
+        if ordinal != 4 {
+            return Err(A2aAdapterError::InvalidResponse);
+        }
+        Ok(())
     }
 
     /// Accepts exactly the four events emitted by the local Reference Agent.
@@ -165,39 +195,47 @@ impl A2aAdapter {
         if stream.len() != 4 {
             return Err(A2aAdapterError::InvalidResponse);
         }
+        stream
+            .iter()
+            .enumerate()
+            .map(|(ordinal, event)| Self::validate_event(packet, event, ordinal as u64))
+            .collect()
+    }
+
+    fn validate_event(
+        packet: &RoomContextPacket,
+        event: &StreamResponse,
+        ordinal: u64,
+    ) -> Result<A2aTaskEvent, A2aAdapterError> {
         let task_id = packet.task_id.to_string();
         let context_id = format!("{}:{}", packet.room_id, packet.context_revision);
-        let submitted = match &stream[0] {
-            StreamResponse::Task(task)
-                if task.id == task_id
-                    && task.context_id == context_id
-                    && task.status.state == TaskState::Submitted
-                    && task.status.message.is_none()
-                    && task.status.timestamp.is_none()
-                    && task.artifacts.is_none()
-                    && task.history.is_none()
-                    && task.metadata.is_none() =>
-            {
-                A2aTaskEvent::Submitted { ordinal: 0 }
-            }
-            _ => return Err(A2aAdapterError::InvalidResponse),
-        };
-        let first_working = working_event(
-            &stream[1],
-            &task_id,
-            &context_id,
-            1,
-            "Reading authorized room context",
-        )?;
-        let second_working = working_event(
-            &stream[2],
-            &task_id,
-            &context_id,
-            2,
-            "Preparing cited result",
-        )?;
-        let completed = completed_event(packet, &stream[3], &task_id, &context_id)?;
-        Ok(vec![submitted, first_working, second_working, completed])
+        match ordinal {
+            0 => match event {
+                StreamResponse::Task(task)
+                    if task.id == task_id
+                        && task.context_id == context_id
+                        && task.status.state == TaskState::Submitted
+                        && task.status.message.is_none()
+                        && task.status.timestamp.is_none()
+                        && task.artifacts.is_none()
+                        && task.history.is_none()
+                        && task.metadata.is_none() =>
+                {
+                    Ok(A2aTaskEvent::Submitted { ordinal: 0 })
+                }
+                _ => Err(A2aAdapterError::InvalidResponse),
+            },
+            1 => working_event(
+                event,
+                &task_id,
+                &context_id,
+                1,
+                "Reading authorized room context",
+            ),
+            2 => working_event(event, &task_id, &context_id, 2, "Preparing cited result"),
+            3 => completed_event(packet, event, &task_id, &context_id),
+            _ => Err(A2aAdapterError::InvalidResponse),
+        }
     }
 }
 
@@ -216,6 +254,7 @@ pub enum A2aAdapterError {
 fn local_http_client() -> Result<reqwest::Client, A2aAdapterError> {
     reqwest::Client::builder()
         .no_proxy()
+        .timeout(std::time::Duration::from_secs(10))
         .redirect(Policy::none())
         .build()
         .map_err(|_| A2aAdapterError::Transport)

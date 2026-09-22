@@ -27,6 +27,51 @@ fn packet() -> RoomContextPacket {
         .expect("fixture must be a room context packet")
 }
 
+// Exercise the patched official transport at its HTTP boundary, including
+// frames it skips before yielding a typed protocol event.
+#[tokio::test]
+async fn official_transport_bounds_raw_frames_comments_and_partial_eof() {
+    use a2a_client::{Transport, jsonrpc::JsonRpcTransport};
+    use futures::TryStreamExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for body in [
+        "x".repeat(65_537),
+        ": comment\n\n".repeat(9),
+        format!(":{}\n\n", "x".repeat(60_000)).repeat(3),
+        "data: {\"unfinished\":".to_owned(),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 16384];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        });
+        let transport = JsonRpcTransport::new(reqwest::Client::new(), format!("http://{address}"));
+        let request = a2a::SendMessageRequest {
+            message: a2a::Message::new(a2a::Role::User, vec![a2a::Part::text("test")]),
+            configuration: None,
+            metadata: None,
+            tenant: None,
+        };
+        let mut stream = transport
+            .send_streaming_message(&Default::default(), &request)
+            .await
+            .unwrap();
+        assert!(
+            stream.try_next().await.is_err(),
+            "oversized or truncated SSE must fail"
+        );
+        server.await.unwrap();
+    }
+}
+
 // This catches a gateway that admits a completed A2A artifact without proving
 // it is bound to the claimed packet and cites only visible packet events.
 #[test]
@@ -98,6 +143,7 @@ fn adapter_rejects_well_formed_but_non_deterministic_terminal_results() {
 
     let mut action_packet = packet();
     action_packet.skill_id = "extract-action-items".to_owned();
+    action_packet.events[1]["payload"]["skillId"] = serde_json::json!(action_packet.skill_id);
     action_packet.canonical_sha256 = canonical_packet_sha256(&action_packet).unwrap();
     let mut forged_actions = stream_for_packet(&action_packet).unwrap();
     let a2a::event::StreamResponse::Task(task) = forged_actions.last_mut().unwrap() else {
