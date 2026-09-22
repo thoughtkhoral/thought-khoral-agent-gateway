@@ -18,6 +18,14 @@ tag's workspace manifest pins `a2a-lf` at `0.3.0`; this is the compatible core
 release adopted here. Cargo requirements use exact (`=`) versions and the lock
 file is committed.
 
+For source-archive provenance, the official client tag archive downloaded from
+`https://github.com/a2aproject/a2a-rs/archive/refs/tags/a2a-client-lf-v0.2.3.tar.gz`
+on 2026-09-22 had SHA-256
+`f37578041b7ce1bb275a9e2a00a474c811db1d3077712257c1f4f2394a3f23e4`.
+This archive is the source snapshot for client tag commit
+`33b522ee17449bb93fdbe442aed1edf5498e78c7`; the core tag/commit remains
+separately recorded in the table above.
+
 ## Review evidence
 
 - **Official source and release:** `git ls-remote --tags

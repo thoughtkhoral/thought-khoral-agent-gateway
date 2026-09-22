@@ -13,22 +13,42 @@ fn config_rejects_non_loopback_agent_or_unallowlisted_handoff_host() {
 }
 
 #[test]
+fn config_rejects_unpinned_https_room_gateway_and_ip_handoff_hosts() {
+    let mut remote_room_gateway = test_env("http://127.0.0.1:9090", "allowed.example");
+    remote_room_gateway.insert(
+        "THOUGHT_KHORAL_ROOM_GATEWAY_ORIGIN".into(),
+        "https://room-gateway.attacker.invalid".into(),
+    );
+    assert!(GatewayConfig::parse(remote_room_gateway).is_err());
+
+    let mut ip_handoff = test_env("http://127.0.0.1:9090", "127.0.0.1");
+    ip_handoff.insert(
+        "THOUGHT_KHORAL_ALLOWED_HANDOFF_HOSTS".into(),
+        "127.0.0.1".into(),
+    );
+    assert!(GatewayConfig::parse(ip_handoff).is_err());
+
+    let mut noncanonical_ip_handoff = test_env("http://127.0.0.1:9090", "127.000.0.1");
+    noncanonical_ip_handoff.insert(
+        "THOUGHT_KHORAL_ALLOWED_HANDOFF_HOSTS".into(),
+        "127.000.0.1".into(),
+    );
+    assert!(GatewayConfig::parse(noncanonical_ip_handoff).is_err());
+}
+
+#[test]
 fn config_requires_service_credentials_and_short_operational_limits() {
     let config = GatewayConfig::parse(test_env("http://127.0.0.1:9090", "allowed.example"))
         .expect("the pinned local reference-agent configuration is valid");
 
     assert_eq!(
-        config.room_gateway_origin.as_str(),
+        config.room_gateway_origin().as_str(),
         "http://127.0.0.1:8080/"
     );
-    assert_eq!(
-        config.client_credentials.client_id,
-        "thought-khoral-agent-gateway"
-    );
-    assert_eq!(config.lease_seconds, 120);
-    assert_eq!(config.poll_millis, 1_000);
-    assert_eq!(config.update_rate_per_minute, 30);
-    assert!(config.allowed_handoff_hosts.contains("allowed.example"));
+    assert_eq!(config.lease_seconds(), 120);
+    assert_eq!(config.poll_millis(), 1_000);
+    assert_eq!(config.update_rate_per_minute(), 30);
+    assert!(config.allowed_handoff_hosts().contains("allowed.example"));
 }
 
 fn test_env(card_url: &str, selected_handoff_host: &str) -> BTreeMap<String, String> {

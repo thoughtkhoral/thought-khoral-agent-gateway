@@ -10,7 +10,7 @@ pub mod domain;
 pub mod registry;
 pub mod room_client;
 
-pub use config::{ClientCredentialsConfig, ConfigError, GatewayConfig};
+pub use config::{ConfigError, GatewayConfig, RoomGatewayOrigin};
 pub use domain::{
     ActiveDecision, AgentTaskLease, ClaimRequest, ContextResponse, NormalizedAgentTaskUpdate,
     RoomContextPacket, TaskUpdateRequest, TaskUpdateResponse,
@@ -18,7 +18,4 @@ pub use domain::{
 pub use registry::{
     PinnedAgentRegistration, RegisteredAgent, RegistryError, SkillId, reference_registration,
 };
-pub use room_client::{
-    ClientCredentialsTokenProvider, RoomClientError, RoomGatewayClient, ServiceTokenProvider,
-    StaticServiceTokenProvider,
-};
+pub use room_client::{RoomClientError, RoomGatewayClient};

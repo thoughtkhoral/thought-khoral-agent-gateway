@@ -8,26 +8,27 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
-    ClientCredentialsConfig, GatewayConfig,
+    GatewayConfig,
+    config::ClientCredentialsConfig,
     domain::{ClaimRequest, ContextResponse, TaskUpdateRequest, TaskUpdateResponse},
 };
 
 const LEASE_TOKEN_HEADER: &str = "x-thought-khoral-lease-token";
 
 #[async_trait]
-pub trait ServiceTokenProvider: Send + Sync {
+trait ServiceTokenProvider: Send + Sync {
     /// Obtains only a workload/client-credentials token. This API has no
     /// browser-token input by design.
     async fn service_access_token(&self) -> Result<String, RoomClientError>;
 }
 
-pub struct ClientCredentialsTokenProvider {
+struct ClientCredentialsTokenProvider {
     client: Client,
     credentials: ClientCredentialsConfig,
 }
 
 impl ClientCredentialsTokenProvider {
-    pub fn new(credentials: ClientCredentialsConfig) -> Result<Self, RoomClientError> {
+    fn new(credentials: ClientCredentialsConfig) -> Result<Self, RoomClientError> {
         Ok(Self {
             client: secure_http_client()?,
             credentials,
@@ -40,9 +41,9 @@ impl ServiceTokenProvider for ClientCredentialsTokenProvider {
     async fn service_access_token(&self) -> Result<String, RoomClientError> {
         let response = self
             .client
-            .post(self.credentials.token_url.clone())
+            .post(self.credentials.token_url().clone())
             .basic_auth(
-                &self.credentials.client_id,
+                self.credentials.client_id(),
                 Some(self.credentials.client_secret()),
             )
             .form(&[("grant_type", "client_credentials")])
@@ -57,21 +58,21 @@ impl ServiceTokenProvider for ClientCredentialsTokenProvider {
     }
 }
 
-/// Test-only style provider for exercising the client boundary. Production
-/// construction is `RoomGatewayClient::from_config`, which uses the
-/// client-credentials provider above.
-pub struct StaticServiceTokenProvider {
+#[cfg(test)]
+struct StaticServiceTokenProvider {
     token: String,
 }
 
+#[cfg(test)]
 impl StaticServiceTokenProvider {
-    pub fn new(token: impl Into<String>) -> Self {
+    fn new(token: impl Into<String>) -> Self {
         Self {
             token: token.into(),
         }
     }
 }
 
+#[cfg(test)]
 #[async_trait]
 impl ServiceTokenProvider for StaticServiceTokenProvider {
     async fn service_access_token(&self) -> Result<String, RoomClientError> {
@@ -91,16 +92,17 @@ pub struct RoomGatewayClient {
 impl RoomGatewayClient {
     pub fn from_config(config: &GatewayConfig) -> Result<Self, RoomClientError> {
         let token_provider = Arc::new(ClientCredentialsTokenProvider::new(
-            config.client_credentials.clone(),
+            config.client_credentials().clone(),
         )?);
         Ok(Self {
-            origin: config.room_gateway_origin.clone(),
+            origin: config.room_gateway_origin().as_url().clone(),
             client: secure_http_client()?,
             token_provider,
         })
     }
 
-    pub fn for_test(origin: Url, token_provider: Arc<dyn ServiceTokenProvider>) -> Self {
+    #[cfg(test)]
+    fn for_test(origin: Url, token_provider: Arc<dyn ServiceTokenProvider>) -> Self {
         Self {
             origin,
             client: secure_http_client().expect("safe HTTP client construction"),
@@ -182,6 +184,9 @@ impl RoomGatewayClient {
 
 fn secure_http_client() -> Result<Client, RoomClientError> {
     Client::builder()
+        // Workload secrets must not be sent to a host configured through the
+        // ambient HTTP(S)_PROXY environment.
+        .no_proxy()
         // A redirect could move a workload bearer token to another origin.
         .redirect(Policy::none())
         .build()
@@ -201,4 +206,83 @@ pub enum RoomClientError {
     EmptyServiceToken,
     #[error("HTTP client request failed")]
     Http(#[from] reqwest::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        sync::Mutex,
+    };
+
+    use super::*;
+    use crate::ClaimRequest;
+
+    #[tokio::test]
+    async fn room_client_never_forwards_a_user_access_token() {
+        let server = recording_mock_room_gateway().await;
+        RoomGatewayClient::for_test(server.url(), service_token_provider())
+            .claim(ClaimRequest {
+                lease_owner: Uuid::new_v4(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            server.last_authorization().await,
+            Some("Bearer service-token".into())
+        );
+    }
+
+    fn service_token_provider() -> Arc<StaticServiceTokenProvider> {
+        Arc::new(StaticServiceTokenProvider::new("service-token"))
+    }
+
+    struct RecordingMockRoomGateway {
+        url: Url,
+        authorization: Arc<Mutex<Option<String>>>,
+    }
+
+    impl RecordingMockRoomGateway {
+        fn url(&self) -> Url {
+            self.url.clone()
+        }
+
+        async fn last_authorization(&self) -> Option<String> {
+            self.authorization.lock().await.clone()
+        }
+    }
+
+    async fn recording_mock_room_gateway() -> RecordingMockRoomGateway {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let authorization = Arc::new(Mutex::new(None));
+        let recorded_authorization = Arc::clone(&authorization);
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 4_096];
+            let read = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            let value = request
+                .lines()
+                .find_map(|line| line.strip_prefix("authorization: "))
+                .map(str::to_owned);
+            *recorded_authorization.lock().await = value;
+            socket
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        RecordingMockRoomGateway {
+            url: Url::parse(&format!("http://{address}")).unwrap(),
+            authorization,
+        }
+    }
 }

@@ -1,77 +1,42 @@
-use std::sync::Arc;
+use std::collections::BTreeMap;
 
-use thought_khoral_agent_gateway::{ClaimRequest, RoomGatewayClient, StaticServiceTokenProvider};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
-    sync::Mutex,
-};
-use url::Url;
-use uuid::Uuid;
+use thought_khoral_agent_gateway::{GatewayConfig, RoomGatewayClient};
 
-#[tokio::test]
-async fn room_client_never_forwards_a_user_access_token() {
-    let server = recording_mock_room_gateway().await;
-    RoomGatewayClient::for_test(server.url(), service_token_provider())
-        .claim(test_claim())
-        .await
-        .unwrap();
-
-    assert_eq!(
-        server.last_authorization().await,
-        Some("Bearer service-token".into())
-    );
+#[test]
+fn room_client_can_only_be_constructed_from_a_trusted_gateway_config() {
+    let config = GatewayConfig::parse(test_env()).expect("trusted local development origin");
+    assert!(RoomGatewayClient::from_config(&config).is_ok());
 }
 
-fn service_token_provider() -> Arc<StaticServiceTokenProvider> {
-    Arc::new(StaticServiceTokenProvider::new("service-token"))
-}
-
-fn test_claim() -> ClaimRequest {
-    ClaimRequest {
-        lease_owner: Uuid::new_v4(),
-    }
-}
-
-struct RecordingMockRoomGateway {
-    url: Url,
-    authorization: Arc<Mutex<Option<String>>>,
-}
-
-impl RecordingMockRoomGateway {
-    fn url(&self) -> Url {
-        self.url.clone()
-    }
-
-    async fn last_authorization(&self) -> Option<String> {
-        self.authorization.lock().await.clone()
-    }
-}
-
-async fn recording_mock_room_gateway() -> RecordingMockRoomGateway {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let authorization = Arc::new(Mutex::new(None));
-    let recorded_authorization = Arc::clone(&authorization);
-
-    tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let mut request = vec![0_u8; 4_096];
-        let read = socket.read(&mut request).await.unwrap();
-        let request = String::from_utf8_lossy(&request[..read]);
-        let value = request
-            .lines()
-            .find_map(|line| line.strip_prefix("authorization: "))
-            .map(str::to_owned);
-        *recorded_authorization.lock().await = value;
-        socket
-            .write_all(b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
-            .await
-            .unwrap();
-    });
-
-    RecordingMockRoomGateway {
-        url: Url::parse(&format!("http://{address}")).unwrap(),
-        authorization,
-    }
+fn test_env() -> BTreeMap<String, String> {
+    [
+        (
+            "THOUGHT_KHORAL_ROOM_GATEWAY_ORIGIN",
+            "http://127.0.0.1:8080",
+        ),
+        (
+            "THOUGHT_KHORAL_KEYCLOAK_TOKEN_URL",
+            "http://127.0.0.1:8081/realms/thought-khoral/protocol/openid-connect/token",
+        ),
+        (
+            "THOUGHT_KHORAL_AGENT_GATEWAY_CLIENT_ID",
+            "thought-khoral-agent-gateway",
+        ),
+        ("THOUGHT_KHORAL_AGENT_GATEWAY_CLIENT_SECRET", "test-secret"),
+        (
+            "THOUGHT_KHORAL_REFERENCE_AGENT_CARD_URL",
+            "http://127.0.0.1:9090",
+        ),
+        ("THOUGHT_KHORAL_ALLOWED_HANDOFF_HOSTS", "allowed.example"),
+        (
+            "THOUGHT_KHORAL_REFERENCE_AGENT_HANDOFF_HOST",
+            "allowed.example",
+        ),
+        ("THOUGHT_KHORAL_AGENT_LEASE_SECONDS", "120"),
+        ("THOUGHT_KHORAL_AGENT_POLL_MILLIS", "1000"),
+        ("THOUGHT_KHORAL_AGENT_UPDATE_RATE_PER_MINUTE", "30"),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+    .collect()
 }

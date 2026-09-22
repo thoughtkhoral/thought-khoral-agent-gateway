@@ -6,15 +6,43 @@ use url::{Host, Url};
 const REQUIRED_CLIENT_ID: &str = "thought-khoral-agent-gateway";
 const FIXED_REFERENCE_AGENT_BASE_URL: &str = "http://127.0.0.1:9090/";
 const FIXED_REFERENCE_AGENT_CARD_URL: &str = "http://127.0.0.1:9090/.well-known/agent-card.json";
+const TRUSTED_ROOM_GATEWAY_ORIGINS: [&str; 3] = [
+    "http://127.0.0.1:8080/",
+    "http://thought-khoral-room-gateway:8080/",
+    "http://thought-khoral-room-gateway.thought-khoral-dev.svc.cluster.local:8080/",
+];
+
+/// A room-gateway authority reviewed into this crate. It cannot be constructed
+/// from arbitrary configuration outside this module.
+#[derive(Clone, Debug)]
+pub struct RoomGatewayOrigin(Url);
+
+impl RoomGatewayOrigin {
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    pub(crate) fn as_url(&self) -> &Url {
+        &self.0
+    }
+}
 
 #[derive(Clone)]
 pub struct ClientCredentialsConfig {
-    pub token_url: Url,
-    pub client_id: String,
+    token_url: Url,
+    client_id: String,
     client_secret: String,
 }
 
 impl ClientCredentialsConfig {
+    pub(crate) fn token_url(&self) -> &Url {
+        &self.token_url
+    }
+
+    pub(crate) fn client_id(&self) -> &str {
+        &self.client_id
+    }
+
     pub(crate) fn client_secret(&self) -> &str {
         &self.client_secret
     }
@@ -33,20 +61,19 @@ impl std::fmt::Debug for ClientCredentialsConfig {
 
 #[derive(Clone, Debug)]
 pub struct GatewayConfig {
-    pub room_gateway_origin: Url,
-    pub client_credentials: ClientCredentialsConfig,
-    pub reference_agent_card_url: Url,
-    pub allowed_handoff_hosts: BTreeSet<String>,
-    pub lease_seconds: u64,
-    pub poll_millis: u64,
-    pub update_rate_per_minute: u32,
+    room_gateway_origin: RoomGatewayOrigin,
+    client_credentials: ClientCredentialsConfig,
+    allowed_handoff_hosts: BTreeSet<String>,
+    lease_seconds: u64,
+    poll_millis: u64,
+    update_rate_per_minute: u32,
 }
 
 impl GatewayConfig {
     /// Parses the deployment environment without reading a browser or user
     /// credential. The fixed reference-agent card is local-only.
     pub fn parse(environment: BTreeMap<String, String>) -> Result<Self, ConfigError> {
-        let room_gateway_origin = parse_origin(required(
+        let room_gateway_origin = parse_trusted_room_gateway_origin(required(
             &environment,
             "THOUGHT_KHORAL_ROOM_GATEWAY_ORIGIN",
         )?)?;
@@ -61,7 +88,7 @@ impl GatewayConfig {
             return Err(ConfigError::EmptyClientSecret);
         }
 
-        let reference_agent_card_url = parse_fixed_card_url(required(
+        parse_fixed_card_url(required(
             &environment,
             "THOUGHT_KHORAL_REFERENCE_AGENT_CARD_URL",
         )?)?;
@@ -95,7 +122,6 @@ impl GatewayConfig {
                 client_id: client_id.to_owned(),
                 client_secret: client_secret.to_owned(),
             },
-            reference_agent_card_url,
             allowed_handoff_hosts,
             lease_seconds,
             poll_millis,
@@ -107,12 +133,28 @@ impl GatewayConfig {
         Self::parse(std::env::vars().collect())
     }
 
-    pub fn reference_agent_base_url(&self) -> Url {
-        let mut base = self.reference_agent_card_url.clone();
-        base.set_path("");
-        base.set_query(None);
-        base.set_fragment(None);
-        base
+    pub fn room_gateway_origin(&self) -> &RoomGatewayOrigin {
+        &self.room_gateway_origin
+    }
+
+    pub fn allowed_handoff_hosts(&self) -> &BTreeSet<String> {
+        &self.allowed_handoff_hosts
+    }
+
+    pub fn lease_seconds(&self) -> u64 {
+        self.lease_seconds
+    }
+
+    pub fn poll_millis(&self) -> u64 {
+        self.poll_millis
+    }
+
+    pub fn update_rate_per_minute(&self) -> u32 {
+        self.update_rate_per_minute
+    }
+
+    pub(crate) fn client_credentials(&self) -> &ClientCredentialsConfig {
+        &self.client_credentials
     }
 }
 
@@ -120,7 +162,7 @@ impl GatewayConfig {
 pub enum ConfigError {
     #[error("required configuration {0} is missing")]
     Missing(&'static str),
-    #[error("room gateway must be a URL origin without credentials, query, fragment, or path")]
+    #[error("room gateway origin is not one of the reviewed internal authorities")]
     InvalidRoomGatewayOrigin,
     #[error("Keycloak token URL must be HTTP(S), credential-free, and use HTTPS outside loopback")]
     InvalidTokenUrl,
@@ -155,15 +197,17 @@ fn required<'a>(
         .ok_or(ConfigError::Missing(key))
 }
 
-fn parse_origin(value: &str) -> Result<Url, ConfigError> {
+fn parse_trusted_room_gateway_origin(value: &str) -> Result<RoomGatewayOrigin, ConfigError> {
     let origin = Url::parse(value).map_err(|_| ConfigError::InvalidRoomGatewayOrigin)?;
     if !is_exact_origin(&origin)
         || !matches!(origin.scheme(), "http" | "https")
-        || (origin.scheme() == "http" && !is_loopback(&origin))
+        || !TRUSTED_ROOM_GATEWAY_ORIGINS
+            .iter()
+            .any(|trusted| Url::parse(trusted).expect("valid trusted URL") == origin)
     {
         return Err(ConfigError::InvalidRoomGatewayOrigin);
     }
-    Ok(origin)
+    Ok(RoomGatewayOrigin(origin))
 }
 
 fn parse_token_url(value: &str) -> Result<Url, ConfigError> {
@@ -207,6 +251,8 @@ fn parse_handoff_hosts(value: &str) -> Result<BTreeSet<String>, ConfigError> {
 
 fn is_canonical_host(host: &str) -> bool {
     host.len() <= 253
+        && host.parse::<std::net::IpAddr>().is_err()
+        && !is_dotted_numeric_literal(host)
         && host.contains('.')
         && host.split('.').all(|label| {
             !label.is_empty()
@@ -217,6 +263,13 @@ fn is_canonical_host(host: &str) -> bool {
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         })
+}
+
+fn is_dotted_numeric_literal(host: &str) -> bool {
+    host.contains('.')
+        && host
+            .split('.')
+            .all(|label| !label.is_empty() && label.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 fn parse_bounded_u64(
