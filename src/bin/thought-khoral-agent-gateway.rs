@@ -10,9 +10,10 @@ use uuid::Uuid;
 async fn main() -> Result<(), Box<dyn Error>> {
     let config = GatewayConfig::from_process_env()?;
 
-    let bearer_secret = std::env::var("THOUGHT_KHORAL_AGENT_GATEWAY_CLIENT_SECRET")?;
+    let bearer_secret = std::env::var("THOUGHT_KHORAL_REFERENCE_AGENT_INBOUND_SECRET")?;
     // Discovery and invocation use only the pinned loopback URL and the
-    // dedicated workload secret. The server validates the same secret.
+    // dedicated inbound secret. The server validates the same secret. This is
+    // deliberately distinct from the Keycloak client credential in `config`.
     let adapter = A2aAdapter::new(bearer_secret)?;
     let registered_agent: RegisteredAgent = adapter
         .resolve_pinned_card()

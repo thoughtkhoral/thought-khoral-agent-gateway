@@ -51,6 +51,20 @@ fn config_requires_service_credentials_and_short_operational_limits() {
     assert!(config.allowed_handoff_hosts().contains("allowed.example"));
 }
 
+#[test]
+fn config_requires_a_distinct_reference_agent_inbound_secret() {
+    let mut missing_inbound_secret = test_env("http://127.0.0.1:9090", "allowed.example");
+    missing_inbound_secret.remove("THOUGHT_KHORAL_REFERENCE_AGENT_INBOUND_SECRET");
+    assert!(GatewayConfig::parse(missing_inbound_secret).is_err());
+
+    let mut reused_client_secret = test_env("http://127.0.0.1:9090", "allowed.example");
+    reused_client_secret.insert(
+        "THOUGHT_KHORAL_REFERENCE_AGENT_INBOUND_SECRET".into(),
+        "test-secret".into(),
+    );
+    assert!(GatewayConfig::parse(reused_client_secret).is_err());
+}
+
 // Compose and Kubernetes use these reviewed service identities. This fails if
 // an otherwise arbitrary cleartext token endpoint becomes trusted.
 #[test]
@@ -88,6 +102,10 @@ fn test_env(card_url: &str, selected_handoff_host: &str) -> BTreeMap<String, Str
             "thought-khoral-agent-gateway",
         ),
         ("THOUGHT_KHORAL_AGENT_GATEWAY_CLIENT_SECRET", "test-secret"),
+        (
+            "THOUGHT_KHORAL_REFERENCE_AGENT_INBOUND_SECRET",
+            "test-reference-agent-inbound-secret",
+        ),
         ("THOUGHT_KHORAL_REFERENCE_AGENT_CARD_URL", card_url),
         ("THOUGHT_KHORAL_ALLOWED_HANDOFF_HOSTS", "allowed.example"),
         (

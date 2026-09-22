@@ -19,7 +19,9 @@ and rejects the run if that hidden message appears in the packet.
 The local reference agent listens only on `127.0.0.1:9090`. In Compose, the
 agent gateway shares its network namespace; in Kubernetes, it shares the
 agent-gateway pod. Neither workload has a host-published port or a database
-credential. The local `agent-gateway-dev-only` value is disposable fixture
-data; deployment systems must inject managed service credentials, the inbound
-secret, workload identity, and mTLS material without checking a real secret or
-certificate into source control.
+credential. The local `agent-gateway-client-dev-only` Keycloak credential is
+gateway-only; the distinct `reference-agent-inbound-dev-only` bearer secret is
+the only credential received by the reference agent. Deployment systems must
+inject managed service credentials, a distinct inbound secret, workload
+identity, and mTLS material without checking a real secret or certificate into
+source control.

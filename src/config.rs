@@ -91,6 +91,13 @@ impl GatewayConfig {
         if client_secret.is_empty() {
             return Err(ConfigError::EmptyClientSecret);
         }
+        let reference_agent_inbound_secret = required(
+            &environment,
+            "THOUGHT_KHORAL_REFERENCE_AGENT_INBOUND_SECRET",
+        )?;
+        if reference_agent_inbound_secret == client_secret {
+            return Err(ConfigError::ReusedClientSecretAsInboundSecret);
+        }
 
         parse_fixed_card_url(required(
             &environment,
@@ -176,6 +183,8 @@ pub enum ConfigError {
     InvalidClientId,
     #[error("the Keycloak client secret must not be empty")]
     EmptyClientSecret,
+    #[error("the reference-agent inbound secret must be distinct from the Keycloak client secret")]
+    ReusedClientSecretAsInboundSecret,
     #[error(
         "reference agent card must be the pinned loopback card {FIXED_REFERENCE_AGENT_CARD_URL}"
     )]

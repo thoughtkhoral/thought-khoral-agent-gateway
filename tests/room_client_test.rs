@@ -24,6 +24,10 @@ fn test_env() -> BTreeMap<String, String> {
         ),
         ("THOUGHT_KHORAL_AGENT_GATEWAY_CLIENT_SECRET", "test-secret"),
         (
+            "THOUGHT_KHORAL_REFERENCE_AGENT_INBOUND_SECRET",
+            "test-reference-agent-inbound-secret",
+        ),
+        (
             "THOUGHT_KHORAL_REFERENCE_AGENT_CARD_URL",
             "http://127.0.0.1:9090",
         ),
