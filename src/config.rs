@@ -11,6 +11,10 @@ const TRUSTED_ROOM_GATEWAY_ORIGINS: [&str; 3] = [
     "http://thought-khoral-room-gateway:8080/",
     "http://thought-khoral-room-gateway.thought-khoral-dev.svc.cluster.local:8080/",
 ];
+const TRUSTED_KEYCLOAK_TOKEN_URLS: [&str; 2] = [
+    "http://thought-khoral-keycloak:8080/realms/thought-khoral/protocol/openid-connect/token",
+    "http://thought-khoral-keycloak.thought-khoral-dev.svc.cluster.local:8080/realms/thought-khoral/protocol/openid-connect/token",
+];
 
 /// A room-gateway authority reviewed into this crate. It cannot be constructed
 /// from arbitrary configuration outside this module.
@@ -164,7 +168,9 @@ pub enum ConfigError {
     Missing(&'static str),
     #[error("room gateway origin is not one of the reviewed internal authorities")]
     InvalidRoomGatewayOrigin,
-    #[error("Keycloak token URL must be HTTP(S), credential-free, and use HTTPS outside loopback")]
+    #[error(
+        "Keycloak token URL must be HTTP(S), credential-free, and use HTTPS outside loopback except for reviewed internal service origins"
+    )]
     InvalidTokenUrl,
     #[error("only the thought-khoral-agent-gateway Keycloak client is accepted")]
     InvalidClientId,
@@ -212,13 +218,16 @@ fn parse_trusted_room_gateway_origin(value: &str) -> Result<RoomGatewayOrigin, C
 
 fn parse_token_url(value: &str) -> Result<Url, ConfigError> {
     let url = Url::parse(value).map_err(|_| ConfigError::InvalidTokenUrl)?;
+    let reviewed_internal_service = TRUSTED_KEYCLOAK_TOKEN_URLS
+        .iter()
+        .any(|trusted| Url::parse(trusted).expect("valid trusted URL") == url);
     if !matches!(url.scheme(), "http" | "https")
         || !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
         || url.host().is_none()
-        || (url.scheme() == "http" && !is_loopback(&url))
+        || (url.scheme() == "http" && !is_loopback(&url) && !reviewed_internal_service)
     {
         return Err(ConfigError::InvalidTokenUrl);
     }

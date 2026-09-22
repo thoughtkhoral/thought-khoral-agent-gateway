@@ -51,6 +51,28 @@ fn config_requires_service_credentials_and_short_operational_limits() {
     assert!(config.allowed_handoff_hosts().contains("allowed.example"));
 }
 
+// Compose and Kubernetes use these reviewed service identities. This fails if
+// an otherwise arbitrary cleartext token endpoint becomes trusted.
+#[test]
+fn config_accepts_only_reviewed_internal_keycloak_http_origins() {
+    for token_url in [
+        "http://thought-khoral-keycloak:8080/realms/thought-khoral/protocol/openid-connect/token",
+        "http://thought-khoral-keycloak.thought-khoral-dev.svc.cluster.local:8080/realms/thought-khoral/protocol/openid-connect/token",
+    ] {
+        let mut environment = test_env("http://127.0.0.1:9090", "allowed.example");
+        environment.insert("THOUGHT_KHORAL_KEYCLOAK_TOKEN_URL".into(), token_url.into());
+        assert!(GatewayConfig::parse(environment).is_ok(), "{token_url}");
+    }
+
+    let mut unreviewed = test_env("http://127.0.0.1:9090", "allowed.example");
+    unreviewed.insert(
+        "THOUGHT_KHORAL_KEYCLOAK_TOKEN_URL".into(),
+        "http://keycloak.attacker.invalid/realms/thought-khoral/protocol/openid-connect/token"
+            .into(),
+    );
+    assert!(GatewayConfig::parse(unreviewed).is_err());
+}
+
 fn test_env(card_url: &str, selected_handoff_host: &str) -> BTreeMap<String, String> {
     [
         (
