@@ -1,15 +1,16 @@
 # ThoughtKhoral agent gateway
 
-`thought-khoral-agent-gateway` is the planned mediated boundary between
-governed rooms and external A2A/MCP agent runtimes. Its first proposed
-foundation is a locally controlled deterministic A2A reference agent and a
-Room Context Broker; it has not yet been authorized for runtime implementation.
+`thought-khoral-agent-gateway` is the mediated boundary between governed rooms
+and the locally controlled deterministic A2A reference agent. It uses the Room
+Context Broker and is intentionally not a general remote-agent or MCP runtime.
 
 ## Status
 
-Specification-only / incubating. This repository currently contains no runtime
-implementation, package, deployment artifact, credential integration, or tool
-execution path.
+The local foundation is runnable only through the sibling ThoughtKhoral
+platform's rootless development stack. See [the verification
+procedure](docs/verification/a2a-foundation.md). It accepts exactly the pinned
+Reference Agent and its two deterministic skills; remote admission, MCP,
+models, tools, direct storage access, and production deployment are excluded.
 
 Read the [local specification index](.ai/specs/README.md), the
 [deferred capability specification](.ai/specs/what/deferred-agent-gateway.md),
@@ -19,6 +20,6 @@ and the [ThoughtKhoral repository map](https://github.com/thoughtkhoral/thought-
 ## Contributing
 
 Use an issue to propose scope, contracts, security boundaries, or evidence for
-an implementation plan. Runtime work begins only after an approved What, How,
+an implementation plan. Changes remain governed by the approved What, How,
 and implementation plan. See the
 [organization contribution guide](https://github.com/thoughtkhoral/.github/blob/main/CONTRIBUTING.md).
