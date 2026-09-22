@@ -139,22 +139,138 @@ async fn invalid_packet_failure_uses_the_published_invalid_task_input_code() {
     );
 }
 
-// The real room contract restricts external failure codes to this exact enum.
-// This fixture-level assertion binds the worker regression tests to the
-// published schema rather than to a locally invented error vocabulary.
-#[test]
-fn dispatched_failure_codes_are_accepted_by_the_published_room_contract() {
+// The instances below originate from real dispatcher failure paths, not
+// hand-written failure codes. They are hydrated exactly as the room gateway
+// adds its external-task core before validating a persisted event. The pinned
+// contract schema and its pinned envelope resource must accept both emitted
+// codes and reject an internal-only code in the same instance shape.
+#[tokio::test]
+async fn emitted_failed_updates_validate_against_the_pinned_room_event_schema() {
+    let execution_packet = packet();
+    let execution_broker = RecordingBroker::new(execution_packet.clone());
+    let mut invalid_events = A2aTaskEvent::from_stream(
+        &execution_packet,
+        stream_for_packet(&execution_packet).unwrap(),
+    )
+    .unwrap();
+    invalid_events[3].set_result(serde_json::json!({
+        "kind": "context-summary.v1",
+        "summary": "forged",
+        "citations": ["99000000-0000-4000-8000-000000000001"]
+    }));
+    Dispatcher::new(
+        execution_broker.clone(),
+        FixedRunner::new(invalid_events),
+        Uuid::from_u128(0x71000000000040008000000000000006),
+        StdDuration::ZERO,
+    )
+    .run_once()
+    .await
+    .unwrap();
+
+    let mut input_packet = packet();
+    input_packet.issued_at = Utc::now() + Duration::minutes(2);
+    input_packet.expires_at = Utc::now() + Duration::minutes(1);
+    input_packet.canonical_sha256 = canonical_packet_sha256(&input_packet).unwrap();
+    let input_broker = RecordingBroker::new(input_packet.clone());
+    Dispatcher::new(
+        input_broker.clone(),
+        FixedRunner::new(Vec::new()),
+        Uuid::from_u128(0x71000000000040008000000000000007),
+        StdDuration::ZERO,
+    )
+    .run_once()
+    .await
+    .unwrap();
+
+    let validator = pinned_room_event_validator();
+    let execution_update = only_failed_update(&execution_broker).await;
+    let input_update = only_failed_update(&input_broker).await;
+    let execution_event = persisted_external_task_event(&execution_packet, &execution_update);
+    let input_event = persisted_external_task_event(&input_packet, &input_update);
+
+    assert_eq!(
+        execution_event.pointer("/payload/failure/code"),
+        Some(&serde_json::json!("execution_failed"))
+    );
+    assert_eq!(
+        input_event.pointer("/payload/failure/code"),
+        Some(&serde_json::json!("invalid_task_input"))
+    );
+    assert!(
+        validator.validate(&execution_event).is_ok(),
+        "emitted execution_failed event must satisfy the pinned room-event schema"
+    );
+    assert!(
+        validator.validate(&input_event).is_ok(),
+        "emitted invalid_task_input event must satisfy the pinned room-event schema"
+    );
+
+    for unsupported_code in ["invalid_agent_response", "context_expired"] {
+        let mut unsupported_internal_code = execution_event.clone();
+        unsupported_internal_code["payload"]["failure"]["code"] =
+            serde_json::json!(unsupported_code);
+        assert!(
+            validator.validate(&unsupported_internal_code).is_err(),
+            "the same room-event schema must reject {unsupported_code}"
+        );
+    }
+}
+
+async fn only_failed_update(broker: &RecordingBroker) -> TaskUpdateRequest {
+    let updates = broker.updates().await;
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].update.event_type, "agent.task.failed");
+    updates.into_iter().next().unwrap()
+}
+
+fn pinned_room_event_validator() -> jsonschema::Validator {
     let schema: Value = serde_json::from_str(include_str!(
         "../../thought-khoral-contracts/schemas/room-event.schema.json"
     ))
-    .expect("published room contract must be valid JSON");
-    assert_eq!(
-        schema.pointer("/$defs/externalTaskFailedPayload/properties/failure/properties/code/enum"),
-        Some(&serde_json::json!([
-            "invalid_task_input",
-            "execution_failed"
-        ]))
+    .expect("pinned room-event schema must be valid JSON");
+    let envelope: Value = serde_json::from_str(include_str!(
+        "../../thought-khoral-contracts/schemas/envelope.schema.json"
+    ))
+    .expect("pinned envelope schema must be valid JSON");
+    jsonschema::options()
+        .with_draft(jsonschema::Draft::Draft202012)
+        .should_validate_formats(true)
+        .with_resource(
+            "https://n2n.redhat.com/schemas/n2n.room.v1/envelope.schema.json",
+            jsonschema::Resource::from_contents(envelope),
+        )
+        .build(&schema)
+        .expect("pinned room-event schema must compile without retrieval")
+}
+
+fn persisted_external_task_event(packet: &RoomContextPacket, update: &TaskUpdateRequest) -> Value {
+    let mut payload = update.update.payload.clone();
+    let object = payload
+        .as_object_mut()
+        .expect("dispatcher updates are JSON objects");
+    object.insert("taskId".to_owned(), serde_json::json!(packet.task_id));
+    object.insert("agentId".to_owned(), serde_json::json!(packet.agent_id));
+    object.insert(
+        "requesterId".to_owned(),
+        serde_json::json!(packet.requester_id),
     );
+    object.insert("skillId".to_owned(), serde_json::json!(packet.skill_id));
+    object.insert(
+        "contextRevision".to_owned(),
+        serde_json::json!(packet.context_revision),
+    );
+    serde_json::json!({
+        "contractVersion": "n2n.room.v1",
+        "requestId": update.update_id,
+        "roomId": packet.room_id,
+        "occurredAt": update.update.occurred_at,
+        "sequence": 1,
+        "eventId": update.update_id,
+        "eventType": update.update.event_type,
+        "actor": { "id": packet.agent_id, "role": "agent" },
+        "payload": payload,
+    })
 }
 
 // A transport may persist an update and lose its response. The worker must
