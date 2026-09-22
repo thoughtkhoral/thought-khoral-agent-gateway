@@ -6,15 +6,33 @@ rust-version = "1.85"
 license = "Apache-2.0"
 publish = false
 
+[features]
+reference-agent-server = ["dep:a2a-server", "dep:axum"]
+
 [dependencies]
 a2a = { package = "a2a-lf", version = "=0.3.0" }
 a2a-client = { package = "a2a-client-lf", version = "=0.2.3", default-features = false, features = ["rustls-tls"] }
+a2a-server = { package = "a2a-server-lf", version = "=0.4.3", default-features = false, optional = true }
 async-trait = "0.1"
+axum = { version = "=0.8.9", optional = true }
 chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time"] }
 url = "2"
-uuid = { version = "1", features = ["serde", "v4"] }
+uuid = { version = "1", features = ["serde", "v4", "v5"] }
+
+[dev-dependencies]
+a2a-pb = "=0.2.0"
+axum = "=0.8.9"
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+
+[[bin]]
+name = "thought-khoral-reference-agent"
+path = "src/bin/thought-khoral-reference-agent.rs"
+required-features = ["reference-agent-server"]

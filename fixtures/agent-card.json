@@ -1,0 +1,36 @@
+{
+  "name": "Reference Agent",
+  "description": "Deterministic, packet-bound room task processor.",
+  "version": "1.0",
+  "supportedInterfaces": [
+    {
+      "url": "http://127.0.0.1:9090/jsonrpc",
+      "protocolBinding": "JSONRPC",
+      "protocolVersion": "1.0"
+    }
+  ],
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false
+  },
+  "defaultInputModes": ["application/json"],
+  "defaultOutputModes": ["application/json"],
+  "skills": [
+    {
+      "id": "extract-action-items",
+      "name": "Extract action items",
+      "description": "Extracts strictly formatted action items from the authorized task input.",
+      "tags": ["deterministic", "room"],
+      "inputModes": ["application/json"],
+      "outputModes": ["application/json"]
+    },
+    {
+      "id": "summarize-context",
+      "name": "Summarize context",
+      "description": "Summarizes authorized room metadata deterministically.",
+      "tags": ["deterministic", "room"],
+      "inputModes": ["application/json"],
+      "outputModes": ["application/json"]
+    }
+  ]
+}

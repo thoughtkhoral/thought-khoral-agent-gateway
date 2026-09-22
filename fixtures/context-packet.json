@@ -1,0 +1,55 @@
+{
+  "taskId": "84000000-0000-4000-8000-000000000001",
+  "roomId": "10000000-0000-4000-8000-000000000001",
+  "requesterId": "85000000-0000-4000-8000-000000000001",
+  "agentId": "74686f75-6768-746b-686f-72616c000003",
+  "skillId": "summarize-context",
+  "contextRevision": 7,
+  "issuedAt": "2030-01-01T00:00:00Z",
+  "expiresAt": "2030-01-01T00:05:00Z",
+  "input": "- Prepare rollout checklist | owner: Maya | due: Friday\n- malformed action item",
+  "events": [
+    {
+      "actor": {"id": "85000000-0000-4000-8000-000000000001", "role": "human"},
+      "eventId": "88000000-0000-4000-8000-000000000001",
+      "eventType": "message.created",
+      "payload": {"text": "Ship the gateway after a security review."},
+      "roomId": "10000000-0000-4000-8000-000000000001",
+      "sequence": 5
+    },
+    {
+      "actor": {"id": "85000000-0000-4000-8000-000000000001", "role": "human"},
+      "eventId": "88000000-0000-4000-8000-000000000002",
+      "eventType": "agent.task.requested",
+      "payload": {
+        "taskId": "84000000-0000-4000-8000-000000000001",
+        "input": "- Prepare rollout checklist | owner: Maya | due: Friday\n- malformed action item"
+      },
+      "roomId": "10000000-0000-4000-8000-000000000001",
+      "sequence": 6
+    },
+    {
+      "actor": {"id": "85000000-0000-4000-8000-000000000001", "role": "human"},
+      "eventId": "88000000-0000-4000-8000-000000000003",
+      "eventType": "message.created",
+      "payload": {"text": "Maya will prepare the checklist by Friday."},
+      "roomId": "10000000-0000-4000-8000-000000000001",
+      "sequence": 7
+    }
+  ],
+  "activeDecisions": [
+    {
+      "decisionId": "89000000-0000-4000-8000-000000000001",
+      "title": "Ship after security review",
+      "summary": "The gateway ships after review.",
+      "sourceEventIds": ["88000000-0000-4000-8000-000000000001"]
+    },
+    {
+      "decisionId": "89000000-0000-4000-8000-000000000002",
+      "title": "Use packet citations",
+      "summary": "Every result cites visible source events.",
+      "sourceEventIds": ["88000000-0000-4000-8000-000000000003"]
+    }
+  ],
+  "canonicalSha256": "b1af5552bba4a974e1e825ff08b88b9f1ceb4b91dc1ded593bbf1e1049094a35"
+}

@@ -2,21 +2,24 @@
 
 ## Decision
 
-This gateway slice uses only the official [A2A Rust SDK
-repository](https://github.com/a2aproject/a2a-rs) core and client packages. It
-does not include `a2a-server-lf`; hosting the deterministic reference agent is
-explicitly deferred to Task 5.
+The agent-gateway binary uses only the official [A2A Rust SDK
+repository](https://github.com/a2aproject/a2a-rs) core and client packages.
+Task 5 adds the official server package only behind the
+`reference-agent-server` feature, required by the separate
+`thought-khoral-reference-agent` binary. The dispatch binary does not enable
+that feature.
 
 | Dependency alias | Published package | Exact version | Official tag and commit |
 | --- | --- | --- | --- |
 | `a2a` | `a2a-lf` | `0.3.0` | [release/tag](https://github.com/a2aproject/a2a-rs/releases/tag/a2a-lf-v0.3.0): `a2a-lf-v0.3.0`, `903c7b564feae9fde30828e8037e3d0ea4dd9ca4` |
 | `a2a-client` | `a2a-client-lf` | `0.2.3` | [release/tag](https://github.com/a2aproject/a2a-rs/releases/tag/a2a-client-lf-v0.2.3): `a2a-client-lf-v0.2.3`, `33b522ee17449bb93fdbe442aed1edf5498e78c7` |
+| `a2a-server` (reference-agent feature only) | `a2a-server-lf` | `0.4.3` | [release/tag](https://github.com/a2aproject/a2a-rs/releases/tag/a2a-server-lf-v0.4.3): `a2a-server-lf-v0.4.3`, `cd5a4a8fdcd3e69a505481f49e179af5315dec98` |
 
-The two package names differ from their Rust library names: `a2a-lf` exports
-the `a2a` library and `a2a-client-lf` exports `a2a_client`. The client release
-tag's workspace manifest pins `a2a-lf` at `0.3.0`; this is the compatible core
-release adopted here. Cargo requirements use exact (`=`) versions and the lock
-file is committed.
+The package names differ from their Rust library names: `a2a-lf` exports the
+`a2a` library, `a2a-client-lf` exports `a2a_client`, and `a2a-server-lf`
+exports `a2a_server`. Cargo requirements use exact (`=`) versions and the lock
+file is committed. The lockfile checksum for the optional server package is
+`f9ea7cf23a50c687610120890983dda279e008e87f8003ff02b8e5dfbc9c17ef`.
 
 For source-archive provenance, the official client tag archive downloaded from
 `https://github.com/a2aproject/a2a-rs/archive/refs/tags/a2a-client-lf-v0.2.3.tar.gz`
@@ -40,8 +43,10 @@ separately recorded in the table above.
   environment uses Rust 1.93.1, which satisfies that floor.
 - **Bindings:** the official README documents JSON-RPC 2.0 over HTTP and
   HTTP+JSON/REST client bindings; it also documents Server-Sent Events for
-  streaming responses. Task 4 does not invoke an A2A task or run an A2A
-  server, but its pinned client is retained for the Task 5 adapter boundary.
+  streaming responses. Task 5 uses the official JSON-RPC server router only
+  for the local deterministic Reference Agent and validates its stream through
+  the pinned official JSON-RPC client transport. It does not expose REST,
+  gRPC, push, or any non-local endpoint.
 - **Advisory check:** `cargo audit --deny warnings`, 2026-09-22. The project
   security policy identifies `cargo-audit`/RustSec as its advisory source. The
   command result is recorded below against the committed lockfile.

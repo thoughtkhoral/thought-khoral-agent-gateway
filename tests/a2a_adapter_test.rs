@@ -1,0 +1,167 @@
+#[cfg(feature = "reference-agent-server")]
+use a2a::{
+    Message, Part, Role, SendMessageRequest,
+    jsonrpc::{JsonRpcId, JsonRpcRequest, methods},
+};
+#[cfg(feature = "reference-agent-server")]
+use a2a_pb::protojson_conv;
+#[cfg(feature = "reference-agent-server")]
+use axum::{
+    body::Body,
+    http::{Request, StatusCode, header::AUTHORIZATION},
+};
+#[cfg(feature = "reference-agent-server")]
+use http_body_util::BodyExt;
+#[cfg(feature = "reference-agent-server")]
+use thought_khoral_agent_gateway::reference_agent::local_router;
+use thought_khoral_agent_gateway::{
+    RoomContextPacket, a2a_adapter::A2aAdapter, reference_agent::stream_for_packet,
+};
+#[cfg(feature = "reference-agent-server")]
+use tower::ServiceExt;
+
+fn packet() -> RoomContextPacket {
+    serde_json::from_str(include_str!("../fixtures/context-packet.json"))
+        .expect("fixture must be a room context packet")
+}
+
+// This catches a gateway that admits a completed A2A artifact without proving
+// it is bound to the claimed packet and cites only visible packet events.
+#[test]
+fn adapter_accepts_only_the_expected_bound_a2a_stream() {
+    let packet = packet();
+    let events = A2aAdapter::validate_stream(&packet, stream_for_packet(&packet).unwrap())
+        .expect("fixed reference-agent stream must be admitted");
+
+    assert_eq!(events.len(), 4);
+    assert_eq!(
+        events[1].progress_text(),
+        Some("Reading authorized room context")
+    );
+    assert_eq!(events[2].progress_text(), Some("Preparing cited result"));
+
+    let mut invalid = stream_for_packet(&packet).unwrap();
+    let completed = invalid.last_mut().expect("completed event");
+    let a2a::event::StreamResponse::Task(task) = completed else {
+        panic!("completed event must be a task");
+    };
+    let artifact = task.artifacts.as_mut().unwrap().first_mut().unwrap();
+    let a2a::PartContent::Data(data) = &mut artifact.parts[0].content else {
+        panic!("artifact must be JSON data");
+    };
+    data["result"]["citations"] = serde_json::json!(["99000000-0000-4000-8000-000000000001"]);
+    assert!(A2aAdapter::validate_stream(&packet, invalid).is_err());
+
+    let mut mismatched_binding = stream_for_packet(&packet).unwrap();
+    let a2a::event::StreamResponse::Task(task) = mismatched_binding.last_mut().unwrap() else {
+        panic!("completed event must be a task");
+    };
+    let a2a::PartContent::Data(data) = &mut task.artifacts.as_mut().unwrap()[0].parts[0].content
+    else {
+        panic!("artifact must be JSON data");
+    };
+    data["packet"]["contextRevision"] = serde_json::json!(packet.context_revision + 1);
+    assert!(A2aAdapter::validate_stream(&packet, mismatched_binding).is_err());
+}
+
+// This catches a local endpoint that exposes the Agent Card or JSON-RPC
+// transport without the dedicated agent-gateway bearer secret.
+#[tokio::test]
+#[cfg(feature = "reference-agent-server")]
+async fn local_a2a_routes_require_the_agent_gateway_bearer_secret() {
+    let unauthorized = local_router("reference-agent-secret")
+        .oneshot(
+            Request::builder()
+                .uri("/.well-known/agent-card.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let authorized = local_router("reference-agent-secret")
+        .oneshot(
+            Request::builder()
+                .uri("/.well-known/agent-card.json")
+                .header(AUTHORIZATION, "Bearer reference-agent-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(authorized.status(), StatusCode::OK);
+    let body = authorized.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["name"],
+        "Reference Agent"
+    );
+}
+
+// This is an HTTP/JSON-RPC black-box assertion over the official server
+// router. It catches a route that authenticates the card but not task streams,
+// or serializes a stream outside the pinned A2A protocol.
+#[tokio::test]
+#[cfg(feature = "reference-agent-server")]
+async fn local_jsonrpc_stream_requires_bearer_and_returns_the_fixed_four_events() {
+    let packet = packet();
+    let mut message = Message::new(
+        Role::User,
+        vec![Part::text(
+            serde_json::to_string(&serde_json::json!({ "packet": packet })).unwrap(),
+        )],
+    );
+    message.task_id = Some(packet.task_id.to_string());
+    message.context_id = Some(format!("{}:{}", packet.room_id, packet.context_revision));
+    let request = JsonRpcRequest::new(
+        JsonRpcId::Number(1),
+        methods::SEND_STREAMING_MESSAGE,
+        Some(
+            protojson_conv::to_value(&SendMessageRequest {
+                message,
+                configuration: None,
+                metadata: None,
+                tenant: None,
+            })
+            .unwrap(),
+        ),
+    );
+    let request_body = serde_json::to_vec(&request).unwrap();
+    let response = local_router("reference-agent-secret")
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/jsonrpc")
+                .header(AUTHORIZATION, "Bearer reference-agent-secret")
+                .header("accept", "text/event-stream")
+                .header("content-type", "application/json")
+                .body(Body::from(request_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .as_bytes()
+            .starts_with(b"text/event-stream")
+    );
+    let stream = String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(stream.matches("data:").count(), 4, "{stream}");
+    assert!(stream.contains("TASK_STATE_SUBMITTED"));
+    assert!(stream.contains("Reading authorized room context"));
+    assert!(stream.contains("Preparing cited result"));
+    assert!(stream.contains("TASK_STATE_COMPLETED"));
+}
