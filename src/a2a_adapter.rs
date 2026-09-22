@@ -166,20 +166,37 @@ impl A2aAdapter {
             return Err(A2aAdapterError::InvalidResponse);
         }
         let task_id = packet.task_id.to_string();
+        let context_id = format!("{}:{}", packet.room_id, packet.context_revision);
         let submitted = match &stream[0] {
             StreamResponse::Task(task)
                 if task.id == task_id
+                    && task.context_id == context_id
                     && task.status.state == TaskState::Submitted
-                    && task.artifacts.is_none() =>
+                    && task.status.message.is_none()
+                    && task.status.timestamp.is_none()
+                    && task.artifacts.is_none()
+                    && task.history.is_none()
+                    && task.metadata.is_none() =>
             {
                 A2aTaskEvent::Submitted { ordinal: 0 }
             }
             _ => return Err(A2aAdapterError::InvalidResponse),
         };
-        let first_working =
-            working_event(&stream[1], &task_id, 1, "Reading authorized room context")?;
-        let second_working = working_event(&stream[2], &task_id, 2, "Preparing cited result")?;
-        let completed = completed_event(packet, &stream[3], &task_id)?;
+        let first_working = working_event(
+            &stream[1],
+            &task_id,
+            &context_id,
+            1,
+            "Reading authorized room context",
+        )?;
+        let second_working = working_event(
+            &stream[2],
+            &task_id,
+            &context_id,
+            2,
+            "Preparing cited result",
+        )?;
+        let completed = completed_event(packet, &stream[3], &task_id, &context_id)?;
         Ok(vec![submitted, first_working, second_working, completed])
     }
 }
@@ -207,23 +224,43 @@ fn local_http_client() -> Result<reqwest::Client, A2aAdapterError> {
 fn working_event(
     event: &StreamResponse,
     task_id: &str,
+    context_id: &str,
     ordinal: u64,
     expected_text: &str,
 ) -> Result<A2aTaskEvent, A2aAdapterError> {
     let StreamResponse::StatusUpdate(update) = event else {
         return Err(A2aAdapterError::InvalidResponse);
     };
-    let text = update
+    if update.task_id != task_id
+        || update.context_id != context_id
+        || update.status.state != TaskState::Working
+        || update.status.timestamp.is_some()
+        || update.metadata.is_some()
+    {
+        return Err(A2aAdapterError::InvalidResponse);
+    }
+    let message = update
         .status
         .message
         .as_ref()
-        .and_then(|message| message.parts.first())
-        .and_then(Part::as_text)
-        .filter(|text| *text == expected_text)
         .ok_or(A2aAdapterError::InvalidResponse)?;
-    if update.task_id != task_id || update.status.state != TaskState::Working {
+    if message.message_id != format!("{task_id}:{expected_text}")
+        || message.context_id.as_deref() != Some(context_id)
+        || message.task_id.as_deref() != Some(task_id)
+        || message.role != Role::Agent
+        || message.parts.len() != 1
+        || message.metadata.is_some()
+        || message.extensions.is_some()
+        || message.reference_task_ids.is_some()
+    {
         return Err(A2aAdapterError::InvalidResponse);
     }
+    let part = &message.parts[0];
+    let text = part
+        .as_text()
+        .filter(|text| *text == expected_text)
+        .filter(|_| part.filename.is_none() && part.media_type.is_none() && part.metadata.is_none())
+        .ok_or(A2aAdapterError::InvalidResponse)?;
     Ok(A2aTaskEvent::Working {
         ordinal,
         text: text.to_owned(),
@@ -234,11 +271,19 @@ fn completed_event(
     packet: &RoomContextPacket,
     event: &StreamResponse,
     task_id: &str,
+    context_id: &str,
 ) -> Result<A2aTaskEvent, A2aAdapterError> {
     let StreamResponse::Task(task) = event else {
         return Err(A2aAdapterError::InvalidResponse);
     };
-    if task.id != task_id || task.status.state != TaskState::Completed {
+    if task.id != task_id
+        || task.context_id != context_id
+        || task.status.state != TaskState::Completed
+        || task.status.message.is_some()
+        || task.status.timestamp.is_some()
+        || task.history.is_some()
+        || task.metadata.is_some()
+    {
         return Err(A2aAdapterError::InvalidResponse);
     }
     let artifact = task
@@ -246,11 +291,29 @@ fn completed_event(
         .as_ref()
         .filter(|artifacts| artifacts.len() == 1)
         .and_then(|artifacts| artifacts.first())
-        .filter(|artifact| artifact.parts.len() == 1)
+        .filter(|artifact| {
+            artifact.artifact_id == format!("{task_id}:result")
+                && artifact.name.as_deref() == Some("governed-room-result")
+                && artifact.description.as_deref()
+                    == Some("Deterministic result bound to the authorized context packet.")
+                && artifact.parts.len() == 1
+                && artifact.metadata.is_none()
+                && artifact.extensions.is_none()
+        })
         .ok_or(A2aAdapterError::InvalidResponse)?;
-    let PartContent::Data(data) = &artifact.parts[0].content else {
+    let part = &artifact.parts[0];
+    let PartContent::Data(data) = &part.content else {
         return Err(A2aAdapterError::InvalidResponse);
     };
+    if part.filename.is_some()
+        || part.media_type.is_some()
+        || part.metadata.is_some()
+        || data.as_object().is_none_or(|data| {
+            data.len() != 2 || !data.contains_key("packet") || !data.contains_key("result")
+        })
+    {
+        return Err(A2aAdapterError::InvalidResponse);
+    }
     let binding = serde_json::from_value::<PacketBinding>(
         data.get("packet")
             .cloned()

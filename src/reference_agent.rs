@@ -156,11 +156,7 @@ pub fn stream_for_packet(packet: &RoomContextPacket) -> Result<Vec<StreamRespons
     verify_packet(packet)?;
     let task_id = packet.task_id.to_string();
     let context_id = format!("{}:{}", packet.room_id, packet.context_revision);
-    let result = match packet.skill_id.as_str() {
-        "summarize-context" => summary_result(packet),
-        "extract-action-items" => action_items_result(packet)?,
-        _ => return Err(PacketError::UnknownAgentOrSkill),
-    };
+    let result = expected_result(packet)?;
     let binding = json!({
         "taskId": packet.task_id,
         "roomId": packet.room_id,
@@ -337,6 +333,18 @@ fn packet_from_message(message: Option<&Message>) -> Result<RoomContextPacket, P
     .map_err(|_| PacketError::InvalidA2aPacket)
 }
 
+/// Recomputes the sole allowed terminal result for a verified packet. This is
+/// shared by the local server and the gateway admission check so a syntactically
+/// valid but agent-invented result cannot cross the room boundary.
+pub(crate) fn expected_result(packet: &RoomContextPacket) -> Result<Value, PacketError> {
+    verify_packet(packet)?;
+    match packet.skill_id.as_str() {
+        "summarize-context" => Ok(summary_result(packet)),
+        "extract-action-items" => action_items_result(packet),
+        _ => Err(PacketError::UnknownAgentOrSkill),
+    }
+}
+
 fn summary_result(packet: &RoomContextPacket) -> Value {
     let message_count = packet
         .events
@@ -369,20 +377,24 @@ fn summary_result(packet: &RoomContextPacket) -> Value {
 }
 
 fn action_items_result(packet: &RoomContextPacket) -> Result<Value, PacketError> {
-    let action_items = packet
-        .input
+    let invocation = invocation_event(packet).ok_or(PacketError::MissingInvocation)?;
+    let input = invocation
+        .pointer("/payload/input")
+        .and_then(Value::as_str)
+        .ok_or(PacketError::InvocationMismatch)?;
+    let action_items = input
         .lines()
         .filter_map(parse_action_item)
         .take(20)
         .collect::<Vec<_>>();
-    let invocation = invocation_event(packet)
-        .and_then(|event| event.get("eventId"))
+    let invocation_id = invocation
+        .get("eventId")
         .and_then(Value::as_str)
         .ok_or(PacketError::MissingInvocation)?;
     Ok(json!({
         "kind": "action-items.v1",
         "actionItems": action_items,
-        "citations": [invocation],
+        "citations": [invocation_id],
     }))
 }
 
@@ -391,11 +403,16 @@ fn parse_action_item(line: &str) -> Option<Value> {
     let [text, owner, due] = parts.as_slice() else {
         return None;
     };
-    let text = text.trim();
-    let owner = owner.strip_prefix("owner: ")?.trim();
-    let due = due.strip_prefix("due: ")?.trim();
-    (!text.is_empty() && !owner.is_empty() && !due.is_empty())
-        .then(|| json!({ "text": text, "owner": owner, "due": due }))
+    let owner = owner.strip_prefix("owner: ")?;
+    let due = due.strip_prefix("due: ")?;
+    (literal_action_field(text, 2_000)
+        && literal_action_field(owner, 256)
+        && literal_action_field(due, 256))
+    .then(|| json!({ "text": text, "owner": owner, "due": due }))
+}
+
+fn literal_action_field(value: &str, maximum: usize) -> bool {
+    !value.is_empty() && value.len() <= maximum && value == value.trim()
 }
 
 fn skill(id: &str, name: &str, description: &str) -> AgentSkill {

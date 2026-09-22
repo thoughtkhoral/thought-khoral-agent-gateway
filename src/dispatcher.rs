@@ -12,7 +12,7 @@ use crate::{
     ClaimRequest, ContextResponse, NormalizedAgentTaskUpdate, RoomContextPacket, RoomGatewayClient,
     TaskUpdateRequest, TaskUpdateResponse,
     a2a_adapter::{A2aAdapter, A2aTaskEvent},
-    reference_agent::{PacketError, verify_packet},
+    reference_agent::verify_packet,
     update_validation::validate_result,
 };
 
@@ -82,7 +82,7 @@ pub struct Dispatcher<B, A> {
     broker: B,
     a2a: A,
     lease_owner: Uuid,
-    coalesce_interval: Duration,
+    retry_interval: Duration,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -98,17 +98,41 @@ pub enum DispatchError {
     A2a,
 }
 
+#[derive(Clone, Copy)]
+enum TerminalFailure {
+    ContextRefetchFailed,
+    ContextBindingMismatch,
+    InvalidContextPacket,
+    LocalA2aInvocation,
+    A2aResponseAdmission,
+}
+
+impl TerminalFailure {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidContextPacket => "invalid_task_input",
+            Self::ContextRefetchFailed
+            | Self::ContextBindingMismatch
+            | Self::LocalA2aInvocation
+            | Self::A2aResponseAdmission => "execution_failed",
+        }
+    }
+}
+
 impl<B, A> Dispatcher<B, A>
 where
     B: RoomTaskBroker,
     A: A2aTaskRunner,
 {
-    pub fn new(broker: B, a2a: A, lease_owner: Uuid, coalesce_interval: Duration) -> Self {
+    /// `retry_interval` controls replay spacing after a submission response is
+    /// lost. It deliberately does not coalesce protocol events: the fixed A2A
+    /// stream has four distinct, ordered updates that must all reach the room.
+    pub fn new(broker: B, a2a: A, lease_owner: Uuid, retry_interval: Duration) -> Self {
         Self {
             broker,
             a2a,
             lease_owner,
-            coalesce_interval,
+            retry_interval,
         }
     }
 
@@ -137,7 +161,12 @@ where
             Ok(fetched) => fetched,
             Err(_) => {
                 return self
-                    .submit_failure(&fallback_packet, lease_token, "execution_failed", 0)
+                    .submit_failure(
+                        &fallback_packet,
+                        lease_token,
+                        TerminalFailure::ContextRefetchFailed,
+                        0,
+                    )
                     .await;
             }
         };
@@ -148,34 +177,46 @@ where
             || fetched.packet.canonical_sha256 != fallback_packet.canonical_sha256
         {
             return self
-                .submit_failure(&fallback_packet, lease_token, "execution_failed", 0)
+                .submit_failure(
+                    &fallback_packet,
+                    lease_token,
+                    TerminalFailure::ContextBindingMismatch,
+                    0,
+                )
                 .await;
         }
         let packet = fetched.packet;
-        if let Err(error) = verify_packet(&packet) {
-            let code = match error {
-                PacketError::Expired => "context_expired",
-                _ => "execution_failed",
-            };
-            return self.submit_failure(&packet, lease_token, code, 0).await;
+        if verify_packet(&packet).is_err() {
+            return self
+                .submit_failure(
+                    &packet,
+                    lease_token,
+                    TerminalFailure::InvalidContextPacket,
+                    0,
+                )
+                .await;
         }
 
         let events = match self.a2a.invoke(&packet).await {
             Ok(events) => events,
             Err(_) => {
                 return self
-                    .submit_failure(&packet, lease_token, "execution_failed", 0)
+                    .submit_failure(&packet, lease_token, TerminalFailure::LocalA2aInvocation, 0)
                     .await;
             }
         };
         if !validate_agent_events(&packet, &events) {
             return self
-                .submit_failure(&packet, lease_token, "invalid_agent_response", 0)
+                .submit_failure(
+                    &packet,
+                    lease_token,
+                    TerminalFailure::A2aResponseAdmission,
+                    0,
+                )
                 .await;
         }
 
         let mut submitted_updates = 0;
-        let mut previous_progress: Option<(String, String, DateTime<Utc>)> = None;
         for event in events {
             match event {
                 A2aTaskEvent::Submitted { ordinal } => {
@@ -190,23 +231,9 @@ where
                     submitted_updates += 1;
                 }
                 A2aTaskEvent::Working { ordinal, text } => {
-                    let occurred_at = update_occurred_at(&packet, ordinal);
-                    let key = ("working".to_owned(), text.clone());
-                    let repeated = previous_progress.as_ref().is_some_and(|previous| {
-                        previous.0 == key.0
-                            && previous.1 == key.1
-                            && occurred_at
-                                .signed_duration_since(previous.2)
-                                .to_std()
-                                .unwrap_or_default()
-                                < self.coalesce_interval
-                    });
-                    if !repeated {
-                        self.submit_progress(&packet, lease_token, ordinal, "working", &text)
-                            .await?;
-                        previous_progress = Some((key.0, key.1, occurred_at));
-                        submitted_updates += 1;
-                    }
+                    self.submit_progress(&packet, lease_token, ordinal, "working", &text)
+                        .await?;
+                    submitted_updates += 1;
                 }
                 A2aTaskEvent::Completed {
                     ordinal, result, ..
@@ -263,19 +290,19 @@ where
         &self,
         packet: &RoomContextPacket,
         lease_token: Uuid,
-        code: &'static str,
+        failure: TerminalFailure,
         ordinal: u64,
     ) -> Result<DispatchOutcome, DispatchError> {
         let update = NormalizedAgentTaskUpdate {
             event_type: "agent.task.failed".to_owned(),
-            payload: json!({ "failure": { "code": code } }),
+            payload: json!({ "failure": { "code": failure.as_str() } }),
             occurred_at: update_occurred_at(packet, ordinal),
         };
         self.submit(
             packet,
             lease_token,
             ordinal,
-            &format!("failed:{code}"),
+            &format!("failed:{}", failure.as_str()),
             update,
         )
         .await?;
@@ -292,19 +319,30 @@ where
         kind: &str,
         update: NormalizedAgentTaskUpdate,
     ) -> Result<(), DispatchError> {
-        self.broker
-            .submit_update(
-                packet.task_id,
-                lease_token,
-                TaskUpdateRequest {
-                    update_id: deterministic_update_id(packet.task_id, ordinal, kind),
-                    context_revision: packet.context_revision,
-                    update,
-                },
-            )
-            .await
-            .map(|_| ())
-            .map_err(|_| DispatchError::Broker)
+        let request = TaskUpdateRequest {
+            update_id: deterministic_update_id(packet.task_id, ordinal, kind),
+            context_revision: packet.context_revision,
+            update,
+        };
+        loop {
+            if Utc::now() >= packet.expires_at {
+                return Err(DispatchError::Broker);
+            }
+            if self
+                .broker
+                .submit_update(packet.task_id, lease_token, request.clone())
+                .await
+                .is_ok()
+            {
+                return Ok(());
+            }
+
+            if self.retry_interval.is_zero() {
+                tokio::task::yield_now().await;
+            } else {
+                tokio::time::sleep(self.retry_interval).await;
+            }
+        }
     }
 }
 

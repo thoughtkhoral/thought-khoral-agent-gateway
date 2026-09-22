@@ -15,7 +15,9 @@ use http_body_util::BodyExt;
 #[cfg(feature = "reference-agent-server")]
 use thought_khoral_agent_gateway::reference_agent::local_router;
 use thought_khoral_agent_gateway::{
-    RoomContextPacket, a2a_adapter::A2aAdapter, reference_agent::stream_for_packet,
+    RoomContextPacket,
+    a2a_adapter::A2aAdapter,
+    reference_agent::{canonical_packet_sha256, stream_for_packet},
 };
 #[cfg(feature = "reference-agent-server")]
 use tower::ServiceExt;
@@ -62,6 +64,111 @@ fn adapter_accepts_only_the_expected_bound_a2a_stream() {
     };
     data["packet"]["contextRevision"] = serde_json::json!(packet.context_revision + 1);
     assert!(A2aAdapter::validate_stream(&packet, mismatched_binding).is_err());
+}
+
+// A valid JSON result is not sufficient: the gateway must admit only the
+// unique deterministic result for the claimed packet, including its entire
+// citation set and the exact action-item parse.
+#[test]
+fn adapter_rejects_well_formed_but_non_deterministic_terminal_results() {
+    let context_packet = packet();
+
+    let mut forged_summary = stream_for_packet(&context_packet).unwrap();
+    let a2a::event::StreamResponse::Task(task) = forged_summary.last_mut().unwrap() else {
+        panic!("completed event must be a task");
+    };
+    let a2a::PartContent::Data(data) = &mut task.artifacts.as_mut().unwrap()[0].parts[0].content
+    else {
+        panic!("artifact must be JSON data");
+    };
+    data["result"]["summary"] = serde_json::json!("A plausible but forged summary.");
+    assert!(A2aAdapter::validate_stream(&context_packet, forged_summary).is_err());
+
+    let mut missing_summary_citation = stream_for_packet(&context_packet).unwrap();
+    let a2a::event::StreamResponse::Task(task) = missing_summary_citation.last_mut().unwrap()
+    else {
+        panic!("completed event must be a task");
+    };
+    let a2a::PartContent::Data(data) = &mut task.artifacts.as_mut().unwrap()[0].parts[0].content
+    else {
+        panic!("artifact must be JSON data");
+    };
+    data["result"]["citations"] = serde_json::json!(["88000000-0000-4000-8000-000000000001"]);
+    assert!(A2aAdapter::validate_stream(&context_packet, missing_summary_citation).is_err());
+
+    let mut action_packet = packet();
+    action_packet.skill_id = "extract-action-items".to_owned();
+    action_packet.canonical_sha256 = canonical_packet_sha256(&action_packet).unwrap();
+    let mut forged_actions = stream_for_packet(&action_packet).unwrap();
+    let a2a::event::StreamResponse::Task(task) = forged_actions.last_mut().unwrap() else {
+        panic!("completed event must be a task");
+    };
+    let a2a::PartContent::Data(data) = &mut task.artifacts.as_mut().unwrap()[0].parts[0].content
+    else {
+        panic!("artifact must be JSON data");
+    };
+    data["result"]["actionItems"][0]["text"] = serde_json::json!("Arbitrary agent output");
+    assert!(A2aAdapter::validate_stream(&action_packet, forged_actions).is_err());
+
+    let mut wrong_action_citation = stream_for_packet(&action_packet).unwrap();
+    let a2a::event::StreamResponse::Task(task) = wrong_action_citation.last_mut().unwrap() else {
+        panic!("completed event must be a task");
+    };
+    let a2a::PartContent::Data(data) = &mut task.artifacts.as_mut().unwrap()[0].parts[0].content
+    else {
+        panic!("artifact must be JSON data");
+    };
+    data["result"]["citations"] = serde_json::json!(["88000000-0000-4000-8000-000000000001"]);
+    assert!(A2aAdapter::validate_stream(&action_packet, wrong_action_citation).is_err());
+}
+
+// Status stream entries are protocol data, not advisory progress. Their task,
+// context, role, and one text part must all be bound before room updates are
+// emitted.
+#[test]
+fn adapter_rejects_unbound_or_non_agent_a2a_status_events() {
+    let packet = packet();
+
+    let mut wrong_submitted_context = stream_for_packet(&packet).unwrap();
+    let a2a::event::StreamResponse::Task(task) = &mut wrong_submitted_context[0] else {
+        panic!("submitted event must be a task");
+    };
+    task.context_id = "other-context".to_owned();
+    assert!(A2aAdapter::validate_stream(&packet, wrong_submitted_context).is_err());
+
+    let mut wrong_working_context = stream_for_packet(&packet).unwrap();
+    let a2a::event::StreamResponse::StatusUpdate(update) = &mut wrong_working_context[1] else {
+        panic!("working event must be a status update");
+    };
+    update.context_id = "other-context".to_owned();
+    assert!(A2aAdapter::validate_stream(&packet, wrong_working_context).is_err());
+
+    let mut non_agent_message = stream_for_packet(&packet).unwrap();
+    let a2a::event::StreamResponse::StatusUpdate(update) = &mut non_agent_message[2] else {
+        panic!("working event must be a status update");
+    };
+    update.status.message.as_mut().unwrap().role = a2a::Role::User;
+    assert!(A2aAdapter::validate_stream(&packet, non_agent_message).is_err());
+
+    let mut extra_working_part = stream_for_packet(&packet).unwrap();
+    let a2a::event::StreamResponse::StatusUpdate(update) = &mut extra_working_part[2] else {
+        panic!("working event must be a status update");
+    };
+    update
+        .status
+        .message
+        .as_mut()
+        .unwrap()
+        .parts
+        .push(a2a::Part::text("unexpected second part"));
+    assert!(A2aAdapter::validate_stream(&packet, extra_working_part).is_err());
+
+    let mut wrong_completed_context = stream_for_packet(&packet).unwrap();
+    let a2a::event::StreamResponse::Task(task) = wrong_completed_context.last_mut().unwrap() else {
+        panic!("completed event must be a task");
+    };
+    task.context_id = "other-context".to_owned();
+    assert!(A2aAdapter::validate_stream(&packet, wrong_completed_context).is_err());
 }
 
 // This catches a local endpoint that exposes the Agent Card or JSON-RPC

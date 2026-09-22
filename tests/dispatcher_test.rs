@@ -1,4 +1,10 @@
-use std::{collections::BTreeSet, convert::Infallible, sync::Arc, time::Duration as StdDuration};
+use std::{
+    collections::{BTreeSet, VecDeque},
+    error::Error,
+    fmt,
+    sync::Arc,
+    time::Duration as StdDuration,
+};
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
@@ -7,7 +13,7 @@ use thought_khoral_agent_gateway::{
     ClaimRequest, ContextResponse, RoomContextPacket, TaskUpdateRequest, TaskUpdateResponse,
     a2a_adapter::A2aTaskEvent,
     dispatcher::{A2aTaskRunner, Dispatcher, RoomTaskBroker},
-    reference_agent::stream_for_packet,
+    reference_agent::{canonical_packet_sha256, stream_for_packet},
     update_validation::{Handoff, validate_handoff},
 };
 use tokio::sync::Mutex;
@@ -31,7 +37,7 @@ async fn dispatcher_claims_fetches_and_emits_one_ordered_normalized_terminal_str
         broker.clone(),
         runner,
         Uuid::from_u128(0x71000000000040008000000000000001),
-        StdDuration::from_secs(1),
+        StdDuration::ZERO,
     );
 
     let outcome = dispatcher
@@ -90,7 +96,7 @@ async fn invalid_agent_response_creates_only_a_safe_terminal_failure() {
         broker.clone(),
         FixedRunner::new(events),
         Uuid::from_u128(0x71000000000040008000000000000002),
-        StdDuration::from_secs(1),
+        StdDuration::ZERO,
     );
 
     dispatcher
@@ -102,15 +108,109 @@ async fn invalid_agent_response_creates_only_a_safe_terminal_failure() {
     assert_eq!(updates[0].update.event_type, "agent.task.failed");
     assert_eq!(
         updates[0].update.payload["failure"]["code"],
-        "invalid_agent_response"
+        "execution_failed"
     );
 }
 
-// The room gateway compares duplicate update timestamps as well as identifiers
-// and payloads. This catches a retry that derives a stable UUID but calls the
-// wall clock again before submitting the same normalized event.
+// A malformed packet is a caller-visible invalid input, while
+// every other terminal failure remains inside the published contract enum.
 #[tokio::test]
-async fn dispatch_retries_use_byte_for_byte_idempotent_normalized_updates() {
+async fn invalid_packet_failure_uses_the_published_invalid_task_input_code() {
+    let mut packet = packet();
+    packet.issued_at = Utc::now() + Duration::minutes(2);
+    packet.expires_at = Utc::now() + Duration::minutes(1);
+    packet.canonical_sha256 = canonical_packet_sha256(&packet).unwrap();
+    let broker = RecordingBroker::new(packet.clone());
+    let runner = FixedRunner::new(Vec::new());
+    let dispatcher = Dispatcher::new(
+        broker.clone(),
+        runner,
+        Uuid::from_u128(0x71000000000040008000000000000003),
+        StdDuration::ZERO,
+    );
+
+    dispatcher.run_once().await.unwrap();
+    let updates = broker.updates().await;
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].update.event_type, "agent.task.failed");
+    assert_eq!(
+        updates[0].update.payload["failure"]["code"],
+        "invalid_task_input"
+    );
+}
+
+// The real room contract restricts external failure codes to this exact enum.
+// This fixture-level assertion binds the worker regression tests to the
+// published schema rather than to a locally invented error vocabulary.
+#[test]
+fn dispatched_failure_codes_are_accepted_by_the_published_room_contract() {
+    let schema: Value = serde_json::from_str(include_str!(
+        "../../thought-khoral-contracts/schemas/room-event.schema.json"
+    ))
+    .expect("published room contract must be valid JSON");
+    assert_eq!(
+        schema.pointer("/$defs/externalTaskFailedPayload/properties/failure/properties/code/enum"),
+        Some(&serde_json::json!([
+            "invalid_task_input",
+            "execution_failed"
+        ]))
+    );
+}
+
+// A transport may persist an update and lose its response. The worker must
+// replay the identical update ID while its lease is live so the gateway's
+// duplicate acceptance can finish the task rather than stranding it.
+#[tokio::test]
+async fn dispatcher_retries_dropped_progress_and_success_responses_with_the_same_update_ids() {
+    let packet = packet();
+    let broker = RecordingBroker::with_lost_responses(
+        packet.clone(),
+        ["agent.task.progressed", "agent.task.succeeded"],
+    );
+    let runner = FixedRunner::new(
+        A2aTaskEvent::from_stream(&packet, stream_for_packet(&packet).unwrap()).unwrap(),
+    );
+    let dispatcher = Dispatcher::new(
+        broker.clone(),
+        runner,
+        Uuid::from_u128(0x71000000000040008000000000000004),
+        StdDuration::ZERO,
+    );
+
+    let outcome = dispatcher.run_once().await.unwrap();
+    assert_eq!(outcome.submitted_updates, 4);
+    assert_eq!(broker.fetches().await, 1);
+    let accepted = broker.updates().await;
+    assert_eq!(accepted.len(), 4);
+    assert_eq!(
+        accepted.last().unwrap().update.event_type,
+        "agent.task.succeeded"
+    );
+
+    let attempts = broker.attempts().await;
+    assert_eq!(attempts.len(), 6);
+    assert_same_normalized_update(&attempts[0], &attempts[1]);
+    assert_same_normalized_update(&attempts[4], &attempts[5]);
+
+    // The fake follows the room gateway: a task becomes non-claimable once
+    // its terminal update has been accepted, even if its first HTTP reply was
+    // lost. A later poll therefore does not execute it again.
+    assert_eq!(dispatcher.run_once().await.unwrap().submitted_updates, 0);
+}
+
+fn assert_same_normalized_update(first: &TaskUpdateRequest, retry: &TaskUpdateRequest) {
+    assert_eq!(first.update_id, retry.update_id);
+    assert_eq!(first.context_revision, retry.context_revision);
+    assert_eq!(first.update.event_type, retry.update.event_type);
+    assert_eq!(first.update.payload, retry.update.payload);
+    assert_eq!(first.update.occurred_at, retry.update.occurred_at);
+}
+
+// The room gateway compares duplicate update timestamps as well as identifiers
+// and payloads. The test fake itself applies that exact rule when retrying a
+// request after a dropped HTTP response.
+#[tokio::test]
+async fn repeated_poll_does_not_reclaim_an_already_terminal_task() {
     let packet = packet();
     let broker = RecordingBroker::new(packet.clone());
     let runner = FixedRunner::new(
@@ -119,23 +219,13 @@ async fn dispatch_retries_use_byte_for_byte_idempotent_normalized_updates() {
     let dispatcher = Dispatcher::new(
         broker.clone(),
         runner,
-        Uuid::from_u128(0x71000000000040008000000000000003),
-        StdDuration::from_secs(1),
+        Uuid::from_u128(0x71000000000040008000000000000005),
+        StdDuration::ZERO,
     );
 
     dispatcher.run_once().await.unwrap();
-    tokio::time::sleep(StdDuration::from_millis(2)).await;
-    dispatcher.run_once().await.unwrap();
-
-    let updates = broker.updates().await;
-    assert_eq!(updates.len(), 8);
-    for (first, retry) in updates[..4].iter().zip(&updates[4..]) {
-        assert_eq!(first.update_id, retry.update_id);
-        assert_eq!(first.context_revision, retry.context_revision);
-        assert_eq!(first.update.event_type, retry.update.event_type);
-        assert_eq!(first.update.payload, retry.update.payload);
-        assert_eq!(first.update.occurred_at, retry.update.occurred_at);
-    }
+    assert_eq!(dispatcher.run_once().await.unwrap().submitted_updates, 0);
+    assert_eq!(broker.updates().await.len(), 4);
 }
 
 // This catches accepting a handoff which can redirect the worker, has expired,
@@ -170,6 +260,14 @@ struct RecordingBroker {
     context: ContextResponse,
     fetch_count: Arc<Mutex<usize>>,
     updates: Arc<Mutex<Vec<TaskUpdateRequest>>>,
+    attempts: Arc<Mutex<Vec<TaskUpdateRequest>>>,
+    state: Arc<Mutex<RecordingBrokerState>>,
+}
+
+struct RecordingBrokerState {
+    claimed: bool,
+    terminal: bool,
+    lose_response_for: VecDeque<String>,
 }
 
 impl RecordingBroker {
@@ -181,7 +279,26 @@ impl RecordingBroker {
             },
             fetch_count: Arc::new(Mutex::new(0)),
             updates: Arc::new(Mutex::new(Vec::new())),
+            attempts: Arc::new(Mutex::new(Vec::new())),
+            state: Arc::new(Mutex::new(RecordingBrokerState {
+                claimed: false,
+                terminal: false,
+                lose_response_for: VecDeque::new(),
+            })),
         }
+    }
+
+    fn with_lost_responses(
+        packet: RoomContextPacket,
+        event_types: impl IntoIterator<Item = &'static str>,
+    ) -> Self {
+        let mut broker = Self::new(packet);
+        broker.state = Arc::new(Mutex::new(RecordingBrokerState {
+            claimed: false,
+            terminal: false,
+            lose_response_for: event_types.into_iter().map(str::to_owned).collect(),
+        }));
+        broker
     }
 
     async fn fetches(&self) -> usize {
@@ -191,14 +308,24 @@ impl RecordingBroker {
     async fn updates(&self) -> Vec<TaskUpdateRequest> {
         self.updates.lock().await.clone()
     }
+
+    async fn attempts(&self) -> Vec<TaskUpdateRequest> {
+        self.attempts.lock().await.clone()
+    }
 }
 
 #[async_trait]
 impl RoomTaskBroker for RecordingBroker {
-    type Error = Infallible;
+    type Error = RecordingBrokerError;
 
     async fn claim(&self, _request: ClaimRequest) -> Result<Option<ContextResponse>, Self::Error> {
-        Ok(Some(self.context.clone()))
+        let mut state = self.state.lock().await;
+        if state.claimed || state.terminal {
+            Ok(None)
+        } else {
+            state.claimed = true;
+            Ok(Some(self.context.clone()))
+        }
     }
 
     async fn fetch_context(
@@ -216,12 +343,66 @@ impl RoomTaskBroker for RecordingBroker {
         _lease_token: Uuid,
         request: TaskUpdateRequest,
     ) -> Result<TaskUpdateResponse, Self::Error> {
-        self.updates.lock().await.push(request);
+        self.attempts.lock().await.push(request.clone());
+
+        let mut accepted = self.updates.lock().await;
+        if let Some(existing) = accepted
+            .iter()
+            .find(|existing| existing.update_id == request.update_id)
+        {
+            return same_request(existing, &request)
+                .then_some(TaskUpdateResponse {
+                    events: Vec::<Value>::new(),
+                })
+                .ok_or(RecordingBrokerError::ConflictingDuplicate);
+        }
+
+        let mut state = self.state.lock().await;
+        let lost_response = state
+            .lose_response_for
+            .front()
+            .is_some_and(|event_type| event_type == &request.update.event_type);
+        accepted.push(request.clone());
+        if matches!(
+            request.update.event_type.as_str(),
+            "agent.task.succeeded" | "agent.task.failed"
+        ) {
+            state.terminal = true;
+        }
+        if lost_response {
+            state.lose_response_for.pop_front();
+            return Err(RecordingBrokerError::ResponseLost);
+        }
         Ok(TaskUpdateResponse {
             events: Vec::<Value>::new(),
         })
     }
 }
+
+fn same_request(left: &TaskUpdateRequest, right: &TaskUpdateRequest) -> bool {
+    left.update_id == right.update_id
+        && left.context_revision == right.context_revision
+        && left.update.event_type == right.update.event_type
+        && left.update.payload == right.update.payload
+        && left.update.occurred_at == right.update.occurred_at
+}
+
+#[derive(Debug)]
+enum RecordingBrokerError {
+    ResponseLost,
+    ConflictingDuplicate,
+}
+
+impl fmt::Display for RecordingBrokerError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ResponseLost => formatter.write_str("response was lost after persistence"),
+            Self::ConflictingDuplicate => formatter.write_str("duplicate differs from original"),
+        }
+    }
+}
+
+impl Error for RecordingBrokerError {}
 
 struct FixedRunner {
     events: Vec<A2aTaskEvent>,
@@ -235,7 +416,7 @@ impl FixedRunner {
 
 #[async_trait]
 impl A2aTaskRunner for FixedRunner {
-    type Error = Infallible;
+    type Error = std::convert::Infallible;
 
     async fn invoke(&self, _packet: &RoomContextPacket) -> Result<Vec<A2aTaskEvent>, Self::Error> {
         Ok(self.events.clone())

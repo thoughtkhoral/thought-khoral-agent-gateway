@@ -125,6 +125,35 @@ fn extract_action_items_accepts_only_the_strict_line_grammar_and_cites_invocatio
     );
 }
 
+// The accepted grammar is deliberately literal. Whitespace-normalizing a
+// nearly matching line would turn unconstrained prose into a governed action.
+#[test]
+fn extract_action_items_rejects_whitespace_variants_of_the_literal_grammar() {
+    let mut packet = packet();
+    packet.skill_id = "extract-action-items".to_owned();
+    packet.input = concat!(
+        "-  Two spaces after dash | owner: Maya | due: Friday\n",
+        "- Owner starts with space | owner:  Maya | due: Friday\n",
+        "- Due ends with space | owner: Maya | due: Friday "
+    )
+    .to_owned();
+    let invocation = packet
+        .events
+        .iter_mut()
+        .find(|event| event["eventType"] == "agent.task.requested")
+        .expect("fixture has task invocation");
+    invocation["payload"]["input"] = serde_json::json!(packet.input);
+    packet.canonical_sha256 = canonical_packet_sha256(&packet).unwrap();
+
+    let stream = stream_for_packet(&packet).expect("packet itself remains authorized");
+    let result = completed_result(&stream[3]);
+    assert_eq!(result["actionItems"], serde_json::json!([]));
+    assert_eq!(
+        result["citations"],
+        serde_json::json!(["88000000-0000-4000-8000-000000000002"])
+    );
+}
+
 fn status_text(event: &StreamResponse) -> Option<&str> {
     let StreamResponse::StatusUpdate(update) = event else {
         return None;
