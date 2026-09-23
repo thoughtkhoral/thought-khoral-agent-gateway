@@ -109,6 +109,17 @@ fn adapter_accepts_only_the_expected_bound_a2a_stream() {
     };
     data["packet"]["contextRevision"] = serde_json::json!(packet.context_revision + 1);
     assert!(A2aAdapter::validate_stream(&packet, mismatched_binding).is_err());
+
+    let mut fractional_binding = stream_for_packet(&packet).unwrap();
+    let a2a::event::StreamResponse::Task(task) = fractional_binding.last_mut().unwrap() else {
+        panic!("completed event must be a task");
+    };
+    let a2a::PartContent::Data(data) = &mut task.artifacts.as_mut().unwrap()[0].parts[0].content
+    else {
+        panic!("artifact must be JSON data");
+    };
+    data["packet"]["contextRevision"] = serde_json::json!(7.5);
+    assert!(A2aAdapter::validate_stream(&packet, fractional_binding).is_err());
 }
 
 // A valid JSON result is not sufficient: the gateway must admit only the
@@ -317,6 +328,62 @@ async fn local_jsonrpc_stream_requires_bearer_and_returns_the_fixed_four_events(
     assert!(stream.contains("Reading authorized room context"));
     assert!(stream.contains("Preparing cited result"));
     assert!(stream.contains("TASK_STATE_COMPLETED"));
+}
+
+// The in-memory reference stream can be valid while the official JSON-RPC
+// server/client round trip changes a terminal artifact's JSON value.
+#[tokio::test]
+#[cfg(feature = "reference-agent-server")]
+async fn adapter_admits_the_official_jsonrpc_stream() {
+    use a2a_client::{Transport, jsonrpc::JsonRpcTransport};
+    use futures::TryStreamExt;
+    use std::collections::HashMap;
+
+    let packet = packet();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, local_router("reference-agent-secret"))
+            .await
+            .unwrap();
+    });
+
+    let mut message = Message::new(
+        Role::User,
+        vec![Part::text(
+            serde_json::to_string(&serde_json::json!({ "packet": packet })).unwrap(),
+        )],
+    );
+    message.task_id = Some(packet.task_id.to_string());
+    message.context_id = Some(format!("{}:{}", packet.room_id, packet.context_revision));
+    let request = SendMessageRequest {
+        message,
+        configuration: None,
+        metadata: None,
+        tenant: None,
+    };
+    let mut params = HashMap::new();
+    params.insert(
+        "authorization".to_owned(),
+        vec!["Bearer reference-agent-secret".to_owned()],
+    );
+    params.insert("A2A-Version".to_owned(), vec![a2a::VERSION.to_owned()]);
+    let transport =
+        JsonRpcTransport::new(reqwest::Client::new(), format!("http://{address}/jsonrpc"));
+    let stream = transport
+        .send_streaming_message(&params, &request)
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    server.abort();
+
+    assert_eq!(stream.len(), 4);
+    assert_eq!(
+        A2aAdapter::validate_stream(&packet, stream).unwrap().len(),
+        4
+    );
 }
 
 // Startup discovery must impose a response-size limit before attempting to

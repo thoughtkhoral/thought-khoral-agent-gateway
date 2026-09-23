@@ -44,8 +44,33 @@ pub enum A2aTaskEvent {
 pub struct PacketBinding {
     pub task_id: Uuid,
     pub room_id: Uuid,
+    #[serde(deserialize_with = "deserialize_a2a_revision")]
     pub context_revision: i64,
     pub canonical_sha256: String,
+}
+
+fn deserialize_a2a_revision<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    let Some(number) = value.as_number() else {
+        return Err(serde::de::Error::custom("context revision must be numeric"));
+    };
+    if let Some(integer) = number.as_i64() {
+        return Ok(integer);
+    }
+    // A2A DataPart uses protobuf Struct: JSON integer values are transported
+    // through its double-valued NumberValue representation.
+    let Some(float) = number.as_f64() else {
+        return Err(serde::de::Error::custom("context revision is not an i64"));
+    };
+    if float.fract() != 0.0 || float.abs() > 9_007_199_254_740_991.0 {
+        return Err(serde::de::Error::custom(
+            "context revision is not a safely representable integer",
+        ));
+    }
+    Ok(float as i64)
 }
 
 impl A2aTaskEvent {
@@ -186,12 +211,16 @@ impl A2aAdapter {
             .await
             .map_err(|_| A2aAdapterError::Transport)?;
         let mut ordinal = 0;
-        while let Some(event) = stream
-            .try_next()
-            .await
-            .map_err(|_| A2aAdapterError::InvalidResponse)?
-        {
-            let event = Self::validate_event(packet, &event, ordinal)?;
+        loop {
+            let next = stream.try_next().await.map_err(|_| {
+                eprintln!("A2A stream decode failed at ordinal {ordinal}");
+                A2aAdapterError::InvalidResponse
+            })?;
+            let Some(event) = next else { break };
+            let event = Self::validate_event(packet, &event, ordinal).map_err(|error| {
+                eprintln!("A2A event admission failed at ordinal {ordinal}: {error}");
+                error
+            })?;
             sender
                 .send(event)
                 .await
@@ -333,6 +362,7 @@ fn completed_event(
     context_id: &str,
 ) -> Result<A2aTaskEvent, A2aAdapterError> {
     let StreamResponse::Task(task) = event else {
+        eprintln!("terminal A2A response was not a Task");
         return Err(A2aAdapterError::InvalidResponse);
     };
     if task.id != task_id
@@ -343,6 +373,7 @@ fn completed_event(
         || task.history.is_some()
         || task.metadata.is_some()
     {
+        eprintln!("terminal A2A task envelope failed admission");
         return Err(A2aAdapterError::InvalidResponse);
     }
     let artifact = task
@@ -359,9 +390,13 @@ fn completed_event(
                 && artifact.metadata.is_none()
                 && artifact.extensions.is_none()
         })
-        .ok_or(A2aAdapterError::InvalidResponse)?;
+        .ok_or_else(|| {
+            eprintln!("terminal A2A artifact shape failed admission");
+            A2aAdapterError::InvalidResponse
+        })?;
     let part = &artifact.parts[0];
     let PartContent::Data(data) = &part.content else {
+        eprintln!("terminal A2A part was not data");
         return Err(A2aAdapterError::InvalidResponse);
     };
     if part.filename.is_some()
@@ -371,6 +406,7 @@ fn completed_event(
             data.len() != 2 || !data.contains_key("packet") || !data.contains_key("result")
         })
     {
+        eprintln!("terminal A2A data part shape failed admission");
         return Err(A2aAdapterError::InvalidResponse);
     }
     let binding = serde_json::from_value::<PacketBinding>(
@@ -378,19 +414,26 @@ fn completed_event(
             .cloned()
             .ok_or(A2aAdapterError::InvalidResponse)?,
     )
-    .map_err(|_| A2aAdapterError::InvalidResponse)?;
+    .map_err(|_| {
+        eprintln!("terminal A2A packet binding could not be decoded");
+        A2aAdapterError::InvalidResponse
+    })?;
     if binding.task_id != packet.task_id
         || binding.room_id != packet.room_id
         || binding.context_revision != packet.context_revision
         || binding.canonical_sha256 != packet.canonical_sha256
     {
+        eprintln!("terminal A2A packet binding did not match claimed packet");
         return Err(A2aAdapterError::InvalidResponse);
     }
     let result = data
         .get("result")
         .cloned()
         .ok_or(A2aAdapterError::InvalidResponse)?;
-    validate_result(packet, &result).map_err(|_| A2aAdapterError::InvalidResponse)?;
+    validate_result(packet, &result).map_err(|_| {
+        eprintln!("terminal A2A deterministic result did not match claimed packet");
+        A2aAdapterError::InvalidResponse
+    })?;
     Ok(A2aTaskEvent::Completed {
         ordinal: 3,
         result,

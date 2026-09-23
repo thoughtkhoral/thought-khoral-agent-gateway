@@ -239,6 +239,7 @@ where
             let event = tokio::select! {
                 result = &mut invocation, if !invocation_done => {
                     if !matches!(result, Ok(Ok(()))) {
+                        eprintln!("A2A invocation failed for task {} after {received} events: {result:?}", packet.task_id);
                         return self.submit_failure(&packet, lease_token, TerminalFailure::LocalA2aInvocation, received).await;
                     }
                     invocation_done = true;
@@ -250,6 +251,10 @@ where
                 }
             };
             if !validate_agent_event(&packet, &event, received) {
+                eprintln!(
+                    "dispatcher rejected A2A event for task {} at ordinal {received}",
+                    packet.task_id
+                );
                 return self
                     .submit_failure(
                         &packet,
@@ -283,6 +288,11 @@ where
                 }
             };
             if result.is_err() {
+                eprintln!(
+                    "broker rejected progress for task {} at ordinal {}: {result:?}",
+                    packet.task_id,
+                    received - 1
+                );
                 return self
                     .submit_failure(
                         &packet,
