@@ -163,6 +163,28 @@ where
         }
     }
 
+    /// Keep polling through transient broker outages without restarting the
+    /// process. Permanent rejections still surface to the container runtime.
+    pub async fn run_forever(&self, poll_interval: Duration) -> Result<(), DispatchError> {
+        let base_delay = poll_interval.max(Duration::from_millis(250));
+        let mut retry_delay = base_delay;
+        loop {
+            match self.run_once().await {
+                Ok(_) => {
+                    retry_delay = base_delay;
+                    tokio::time::sleep(poll_interval).await;
+                }
+                Err(DispatchError::Broker) => {
+                    eprintln!("room task broker temporarily unavailable; retrying");
+                    let jitter = Duration::from_millis((Uuid::new_v4().as_u128() % 250) as u64);
+                    tokio::time::sleep(jittered_retry_delay(retry_delay, jitter)).await;
+                    retry_delay = retry_delay.saturating_mul(2).min(Duration::from_secs(8));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     /// Claims no more than one task. Every path after a claim either persists
     /// its verified progress and success or attempts a safe terminal failure.
     pub async fn run_once(&self) -> Result<DispatchOutcome, DispatchError> {
@@ -172,7 +194,13 @@ where
                 lease_owner: self.lease_owner,
             })
             .await
-            .map_err(|_| DispatchError::Broker)?
+            .map_err(|error| {
+                if self.broker.retryable(&error) {
+                    DispatchError::Broker
+                } else {
+                    DispatchError::Rejected
+                }
+            })?
         else {
             return Ok(DispatchOutcome {
                 submitted_updates: 0,
@@ -449,6 +477,10 @@ where
     }
 }
 
+fn jittered_retry_delay(base: Duration, jitter: Duration) -> Duration {
+    base.saturating_add(jitter).min(Duration::from_secs(8))
+}
+
 pub fn deterministic_update_id(task_id: Uuid, ordinal: u64, kind: &str) -> Uuid {
     Uuid::new_v5(
         &UPDATE_NAMESPACE,
@@ -495,5 +527,22 @@ fn validate_agent_event(packet: &RoomContextPacket, event: &A2aTaskEvent, ordina
                 && validate_result(packet, result).is_ok()
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod retry_delay_tests {
+    use super::*;
+
+    #[test]
+    fn jitter_never_exceeds_the_retry_cap() {
+        assert_eq!(
+            jittered_retry_delay(Duration::from_secs(8), Duration::from_millis(249)),
+            Duration::from_secs(8)
+        );
+        assert_eq!(
+            jittered_retry_delay(Duration::from_millis(250), Duration::from_millis(249)),
+            Duration::from_millis(499)
+        );
     }
 }

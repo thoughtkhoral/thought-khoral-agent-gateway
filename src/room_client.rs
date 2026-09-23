@@ -212,9 +212,12 @@ pub enum RoomClientError {
 impl RoomClientError {
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Http(error) => error.status().is_none_or(|status| {
-                status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS
-            }),
+            Self::Http(error) => {
+                !error.is_decode()
+                    && error.status().is_none_or(|status| {
+                        status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS
+                    })
+            }
             _ => false,
         }
     }
@@ -249,6 +252,22 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn malformed_successful_claim_response_is_not_retryable() {
+        let server = mock_room_gateway_with_response(
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 1\r\nconnection: close\r\n\r\n{",
+        )
+        .await;
+        let error = RoomGatewayClient::for_test(server.url(), service_token_provider())
+            .claim(ClaimRequest {
+                lease_owner: Uuid::new_v4(),
+            })
+            .await
+            .unwrap_err();
+
+        assert!(!error.is_retryable());
+    }
+
     fn service_token_provider() -> Arc<StaticServiceTokenProvider> {
         Arc::new(StaticServiceTokenProvider::new("service-token"))
     }
@@ -269,6 +288,13 @@ mod tests {
     }
 
     async fn recording_mock_room_gateway() -> RecordingMockRoomGateway {
+        mock_room_gateway_with_response(
+            b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+        )
+        .await
+    }
+
+    async fn mock_room_gateway_with_response(response: &'static [u8]) -> RecordingMockRoomGateway {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let authorization = Arc::new(Mutex::new(None));
@@ -284,12 +310,7 @@ mod tests {
                 .find_map(|line| line.strip_prefix("authorization: "))
                 .map(str::to_owned);
             *recorded_authorization.lock().await = value;
-            socket
-                .write_all(
-                    b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
-                )
-                .await
-                .unwrap();
+            socket.write_all(response).await.unwrap();
         });
 
         RecordingMockRoomGateway {

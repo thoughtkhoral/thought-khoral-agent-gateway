@@ -12,7 +12,7 @@ use serde_json::Value;
 use thought_khoral_agent_gateway::{
     ClaimRequest, ContextResponse, RoomContextPacket, TaskUpdateRequest, TaskUpdateResponse,
     a2a_adapter::A2aTaskEvent,
-    dispatcher::{A2aTaskRunner, Dispatcher, RoomTaskBroker},
+    dispatcher::{A2aTaskRunner, DispatchError, Dispatcher, RoomTaskBroker},
     reference_agent::{canonical_packet_sha256, stream_for_packet},
     update_validation::{Handoff, validate_handoff},
 };
@@ -22,6 +22,50 @@ use uuid::Uuid;
 fn packet() -> RoomContextPacket {
     serde_json::from_str(include_str!("../fixtures/context-packet.json"))
         .expect("fixture must be a room context packet")
+}
+
+#[tokio::test]
+async fn polling_recovers_after_a_retryable_broker_claim_failure() {
+    let broker =
+        RecordingBroker::with_claim_failures(packet(), [RecordingBrokerError::ResponseLost]);
+    let observed = broker.clone();
+    let dispatcher = Dispatcher::new(
+        broker,
+        FixedRunner::new(Vec::new()),
+        Uuid::new_v4(),
+        StdDuration::from_millis(10),
+    );
+    let worker =
+        tokio::spawn(async move { dispatcher.run_forever(StdDuration::from_millis(10)).await });
+    tokio::time::timeout(StdDuration::from_secs(2), async {
+        while observed.claim_attempts().await < 2 {
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("polling must resume after a transient claim failure");
+    assert!(!worker.is_finished(), "polling should remain active");
+    worker.abort();
+}
+
+#[tokio::test]
+async fn polling_stops_after_a_permanent_broker_claim_rejection() {
+    let broker = RecordingBroker::with_claim_failures(packet(), [RecordingBrokerError::Rejected]);
+    let observed = broker.clone();
+    let dispatcher = Dispatcher::new(
+        broker,
+        FixedRunner::new(Vec::new()),
+        Uuid::new_v4(),
+        StdDuration::from_millis(10),
+    );
+    let outcome = tokio::time::timeout(
+        StdDuration::from_secs(1),
+        dispatcher.run_forever(StdDuration::from_millis(10)),
+    )
+    .await
+    .expect("permanent rejection must not retry forever");
+    assert!(matches!(outcome, Err(DispatchError::Rejected)));
+    assert_eq!(observed.claim_attempts().await, 1);
 }
 
 #[test]
@@ -552,6 +596,8 @@ struct RecordingBrokerState {
     claimed: bool,
     terminal: bool,
     lose_response_for: VecDeque<String>,
+    claim_failures: VecDeque<RecordingBrokerError>,
+    claim_attempts: usize,
 }
 
 impl RecordingBroker {
@@ -569,6 +615,8 @@ impl RecordingBroker {
                 claimed: false,
                 terminal: false,
                 lose_response_for: VecDeque::new(),
+                claim_failures: VecDeque::new(),
+                claim_attempts: 0,
             })),
         }
     }
@@ -582,8 +630,29 @@ impl RecordingBroker {
             claimed: false,
             terminal: false,
             lose_response_for: event_types.into_iter().map(str::to_owned).collect(),
+            claim_failures: VecDeque::new(),
+            claim_attempts: 0,
         }));
         broker
+    }
+
+    fn with_claim_failures(
+        packet: RoomContextPacket,
+        failures: impl IntoIterator<Item = RecordingBrokerError>,
+    ) -> Self {
+        let mut broker = Self::new(packet);
+        broker.state = Arc::new(Mutex::new(RecordingBrokerState {
+            claimed: false,
+            terminal: true,
+            lose_response_for: VecDeque::new(),
+            claim_failures: failures.into_iter().collect(),
+            claim_attempts: 0,
+        }));
+        broker
+    }
+
+    async fn claim_attempts(&self) -> usize {
+        self.state.lock().await.claim_attempts
     }
 
     async fn fetches(&self) -> usize {
@@ -608,6 +677,10 @@ impl RoomTaskBroker for RecordingBroker {
 
     async fn claim(&self, _request: ClaimRequest) -> Result<Option<ContextResponse>, Self::Error> {
         let mut state = self.state.lock().await;
+        state.claim_attempts += 1;
+        if let Some(error) = state.claim_failures.pop_front() {
+            return Err(error);
+        }
         if state.claimed || state.terminal {
             Ok(None)
         } else {

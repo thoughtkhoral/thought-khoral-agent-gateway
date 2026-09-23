@@ -31,8 +31,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Uuid::new_v4(),
         Duration::from_secs(1),
     );
-    loop {
-        dispatcher.run_once().await?;
-        tokio::time::sleep(Duration::from_millis(config.poll_millis())).await;
-    }
+    dispatcher
+        .run_forever(Duration::from_millis(config.poll_millis()))
+        .await?;
+    Ok(())
 }
