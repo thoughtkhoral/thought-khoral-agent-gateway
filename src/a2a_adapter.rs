@@ -21,6 +21,8 @@ use crate::{
     update_validation::validate_result,
 };
 
+const MAX_AGENT_CARD_BYTES: usize = 64 * 1024;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum A2aTaskEvent {
     Submitted {
@@ -95,16 +97,34 @@ impl A2aAdapter {
     /// Authenticated local discovery is revalidated against Task 4's immutable
     /// registration before the worker begins polling.
     pub async fn resolve_pinned_card(&self) -> Result<RegisteredAgent, A2aAdapterError> {
-        let card = local_http_client()?
+        let response = local_http_client()?
             .get(REFERENCE_AGENT_CARD)
             .bearer_auth(&self.bearer_secret)
             .send()
             .await
-            .map_err(|_| A2aAdapterError::Transport)?
-            .error_for_status()
-            .map_err(|_| A2aAdapterError::Transport)?
-            .json::<AgentCard>()
+            .map_err(|_| A2aAdapterError::Transport)?;
+        if !response.status().is_success() {
+            return Err(A2aAdapterError::Transport);
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_AGENT_CARD_BYTES as u64)
+        {
+            return Err(A2aAdapterError::InvalidResponse);
+        }
+        let mut body = Vec::new();
+        let mut response = response;
+        while let Some(chunk) = response
+            .chunk()
             .await
+            .map_err(|_| A2aAdapterError::Transport)?
+        {
+            if body.len().saturating_add(chunk.len()) > MAX_AGENT_CARD_BYTES {
+                return Err(A2aAdapterError::InvalidResponse);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let card = serde_json::from_slice::<AgentCard>(&body)
             .map_err(|_| A2aAdapterError::InvalidResponse)?;
         RegisteredAgent::from_pinned_card(reference_registration(), card)
             .map_err(|_| A2aAdapterError::InvalidResponse)

@@ -17,7 +17,7 @@ use thought_khoral_agent_gateway::reference_agent::local_router;
 use thought_khoral_agent_gateway::{
     RoomContextPacket,
     a2a_adapter::A2aAdapter,
-    reference_agent::{canonical_packet_sha256, stream_for_packet},
+    reference_agent::{agent_card, canonical_packet_sha256, stream_for_packet},
 };
 #[cfg(feature = "reference-agent-server")]
 use tower::ServiceExt;
@@ -317,4 +317,37 @@ async fn local_jsonrpc_stream_requires_bearer_and_returns_the_fixed_four_events(
     assert!(stream.contains("Reading authorized room context"));
     assert!(stream.contains("Preparing cited result"));
     assert!(stream.contains("TASK_STATE_COMPLETED"));
+}
+
+// Startup discovery must impose a response-size limit before attempting to
+// deserialize an otherwise-valid Agent Card.
+#[tokio::test]
+async fn startup_card_discovery_rejects_an_oversized_agent_card() {
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:9090").await.unwrap();
+    let mut body = serde_json::to_vec(&agent_card()).unwrap();
+    body.resize(64 * 1024 + 1, b' ');
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 4_096];
+        assert!(socket.read(&mut request).await.unwrap() > 0);
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        socket.write_all(&body).await.unwrap();
+    });
+
+    let adapter = A2aAdapter::new("reference-agent-secret").unwrap();
+    assert!(matches!(
+        adapter.resolve_pinned_card().await,
+        Err(thought_khoral_agent_gateway::a2a_adapter::A2aAdapterError::InvalidResponse)
+    ));
+    server.await.unwrap();
 }
