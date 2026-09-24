@@ -12,6 +12,11 @@ procedure](docs/verification/a2a-foundation.md). It accepts exactly the pinned
 Reference Agent and its two deterministic skills; remote admission, MCP,
 models, tools, direct storage access, and production deployment are excluded.
 
+The gateway pins a reviewed retained-v1 room contract revision in
+[`contracts/lock.json`](contracts/lock.json). Its authenticated internal task
+interface and local A2A transport are separate from the browser room protocol;
+neither grants direct room storage or active-decision authority.
+
 With rootless Podman and sibling platform, room-gateway, memory-engine, and UI
 checkouts available, run the integration gate from the platform directory:
 
