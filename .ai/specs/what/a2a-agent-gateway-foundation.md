@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed — awaiting review of the written design before implementation planning.
+Approved for the local deterministic reference integration. Remote agent
+admission, MCP transport, and production deployment remain deferred.
 
 ## Purpose
 

@@ -17,8 +17,12 @@ gateway's task-scoped packet through its local workload-authenticated harness,
 and rejects the run if that hidden message appears in the packet.
 
 The local reference agent listens only on `127.0.0.1:9090`. In Compose, the
-two agents join the namespace initialized by the credential-free egress setup
-service; in Kubernetes, an init container filters the shared pod namespace.
+two agents share network and PID namespaces with the trusted credential-free
+egress sidecar. It installs default-deny policy before they start, refreshes
+allowed room and identity service IPs, and stops both agent processes if its
+PID 1 exits. Recreate the egress owner and both agents together after such a
+failure; restarting one agent alone is not an isolation recovery procedure.
+Kubernetes instead uses a one-shot init container and CNI NetworkPolicy.
 The reference UID 10002 has loopback only; gateway UID 10001 additionally has
 broker/Keycloak TCP 8080 and DNS resolver access. Both drop all capabilities.
 Neither workload has a host-published port or a database

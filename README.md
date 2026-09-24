@@ -12,9 +12,19 @@ procedure](docs/verification/a2a-foundation.md). It accepts exactly the pinned
 Reference Agent and its two deterministic skills; remote admission, MCP,
 models, tools, direct storage access, and production deployment are excluded.
 
+With rootless Podman and sibling platform, room-gateway, memory-engine, and UI
+checkouts available, run the integration gate from the platform directory:
+
+```sh
+podman-compose up --build -d
+bash scripts/smoke.sh
+```
+
+For the gateway's own tests, run `cargo fmt --check` and `cargo test` here.
+
 Read the [local specification index](.ai/specs/README.md), the
 [deferred capability specification](.ai/specs/what/deferred-agent-gateway.md),
-[proposed A2A foundation](.ai/specs/what/a2a-agent-gateway-foundation.md),
+[approved local A2A foundation](.ai/specs/what/a2a-agent-gateway-foundation.md),
 and the [ThoughtKhoral repository map](https://github.com/thoughtkhoral/thought-khoral/blob/main/docs/repository-map.md).
 
 ## Contributing

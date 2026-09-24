@@ -2,7 +2,9 @@
 
 ## Status
 
-Proposed — awaiting review of the written design before implementation planning.
+Approved for the local deterministic reference integration under the root
+implementation plan. Production workload identity and remote admission remain
+separate work.
 
 ## Governing specifications
 
@@ -45,8 +47,9 @@ domain records remain independent of the dependency.
    structured JSON in an A2A data part.
 6. The agent gateway invokes the matching skill on the pinned local A2A agent
    and records a mapping between ThoughtKhoral and A2A task/context IDs.
-7. The agent gateway validates streamed or pushed A2A status/artifact updates
-   and submits a normalized update to the room gateway. The room gateway
+7. The local worker validates streamed A2A status/artifact updates and submits
+   a normalized update to the room gateway. Push callbacks are a later
+   capability, not part of the local reference path. The room gateway
    persists it before delivery.
 8. The UI renders only room-gateway events. It displays source citations by
    their persisted identifiers and presents external-handoff URLs only after a
@@ -81,7 +84,8 @@ signals a later task update after that UX completes.
 ## Zero-trust controls
 
 - Use short-lived, audience-bound service credentials for every room-gateway ↔
-  agent-gateway call; production uses mutual TLS and workload identity.
+  agent-gateway call; the local reference uses a distinct inbound bearer secret
+  for A2A. Production requires mutual TLS and workload identity.
 - Pin the local Agent Card URL, card identity, allowed skills, endpoint,
   transport/protocol version, and permitted handoff origins. Treat discovery
   as untrusted metadata, not admission.
