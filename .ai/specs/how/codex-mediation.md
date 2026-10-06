@@ -53,3 +53,30 @@ It exposes no task or receipt controls. The broker's CatalogQuery adapter uses
 this fixed route; neither this implementation nor configuration activates the
 service or grants agent admission. These details implement the approved bounded
 authenticated mediation surface; deployment activation remains Task 8.
+
+## Task 6 local implementation checkpoint — 2026-10-06
+
+The provider-free implementation is committed on local branch
+`codex-conversation-mediation`; runtime source through
+`dd4ab0c2c2ea6a718699c37ce68d43171c0b1ccf` preserves the deterministic
+Reference Agent alongside separate pinned Codex dispatch and validation.
+All 66 local tests pass, including 44 existing deterministic checks. Formatting,
+all-target feature-enabled Clippy with warnings denied, exact 135-file contract
+pin verification and whitespace checks pass. The existing 299-package lock graph
+is unchanged; no new dependency versions were introduced.
+
+Real synthetic HTTP fixtures exercise admission, integer-preserving A2A input,
+private durable receipts, worker artifact/binding comparison, broker authority
+and cancellation, catalog authentication, prior disclosed citations, and
+normalized runtime settings/usage. Completed or uncertain receipts prevent
+another worker submission. Lost terminal acknowledgements replay exact stored
+output; revoked/expired records are quarantined, while transient per-record
+failures permit unrelated room claims. Deadline greater than lease and stale
+usage without a context window are rejected. Native runtime IDs remain private.
+
+Independent scoped review resolved recovery starvation and deadline checks;
+cross-component review found and corrected broker pagination and null-window
+usage semantics. The coordinated plan records the final reviewed revisions and
+worker image evidence. These changes remain local and unmerged, with configuration
+disabled by default. UI, opt-in activation and full-stack/provider verification
+remain Tasks 7–9. No live provider, tool isolation or egress coverage is claimed.
