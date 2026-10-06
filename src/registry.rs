@@ -154,6 +154,11 @@ pub enum RegistryError {
     CardDiscovery(String),
 }
 
+/// Reviewed Codex identity, controls and authenticated fixed endpoint.
+pub fn codex_card() -> serde_json::Value {
+    serde_json::json!({"name":"ThoughtKhoral Codex Agent","description":"Explicitly addressed shared room participant","version":"0.1.0","supportedInterfaces":[{"url":"http://thought-khoral-codex-agent:9091","protocolBinding":"JSONRPC","protocolVersion":"1.0"}],"capabilities":{"streaming":false,"pushNotifications":false,"extensions":[{"uri":"thought-khoral.agent-conversation.v1","required":true,"params":{"agentId":"74686f75-6768-746b-686f-72616c000004","conversationScope":"room","invocation":"explicitly-addressed","delivery":"room","roomHistory":"baseline-and-delta","modelSelection":true,"reasoningEffort":true,"usageReporting":true}}]},"defaultInputModes":["application/json"],"defaultOutputModes":["application/json"],"skills":[{"id":"chat","name":"Room chat","description":"Answer an authorized room discussion","tags":["chat"]}],"securitySchemes":{"invocation":{"httpAuthSecurityScheme":{"scheme":"bearer"}}},"securityRequirements":[{"invocation":[]}]})
+}
+
 #[cfg(test)]
 mod tests {
     use tokio::{

@@ -16,3 +16,13 @@ See the [root specification index](https://github.com/thoughtkhoral/thought-khor
 - [How: A2A agent gateway foundation design](how/a2a-agent-gateway-foundation.md)
 - [Implementation plan](https://github.com/thoughtkhoral/thought-khoral/blob/main/docs/superpowers/plans/2026-09-21-a2a-agent-gateway-foundation.md)
 - [Decision 002: ThoughtKhoral project identity](decisions/002-thoughtkhoral-identity.md)
+
+## Approved Codex room-participation extension
+
+- [What: codex mediation](what/codex-mediation.md)
+- [How: codex mediation](how/codex-mediation.md)
+- [Coordinated implementation plan](https://github.com/thoughtkhoral/thought-khoral/blob/main/.ai/specs/how/codex-room-conversations-implementation-plan.md)
+
+Approved by the maintainer on 2026-10-05 under [issue 1](https://github.com/thoughtkhoral/thought-khoral-agent-gateway/issues/1).
+Implementation follows the coordinated plan and its artifact/dependency gates.
+Existing runtime behavior is unchanged until the relevant tasks pass verification.
