@@ -23,6 +23,11 @@ pub enum MediationError {
     State(#[from] std::io::Error),
     #[error("worker execution or authority is uncertain")]
     Interrupted,
+    #[error("broker task authority has expired or been revoked")]
+    AuthorityLost,
+}
+fn definitive_authority_loss(error: &MediationError) -> bool {
+    matches!(error, MediationError::AuthorityLost)
 }
 type Result<T> = std::result::Result<T, MediationError>;
 /// Credentials deliberately do not implement Debug or Serialize.
@@ -393,7 +398,15 @@ impl ConversationDispatcher {
     }
     async fn authority(&self, p: &Value, lease: &str) -> Result<()> {
         let id = p["taskId"].as_str().ok_or(ValidationError)?;
-        let a = self.broker(id, "authority", Some(lease), None).await?;
+        let a = match self.broker(id, "authority", Some(lease), None).await {
+            Err(MediationError::Broker(RoomClientError::Http(e)))
+                if e.status()
+                    .is_some_and(|s| matches!(s.as_u16(), 403 | 409 | 410)) =>
+            {
+                return Err(MediationError::AuthorityLost);
+            }
+            result => result?,
+        };
         if !closed(
             &a,
             &[
@@ -410,10 +423,13 @@ impl ConversationDispatcher {
             || a["contextDigest"] != p["context"]["digest"]
             || a["expiresAt"] != p["expiresAt"]
             || a["authorizationExpiresAt"] != p["authorizationExpiresAt"]
-            || chrono::Utc::now() >= v::timestamp(&a["expiresAt"])?
+        {
+            return Err(ValidationError.into());
+        }
+        if chrono::Utc::now() >= v::timestamp(&a["expiresAt"])?
             || chrono::Utc::now() >= v::timestamp(&a["authorizationExpiresAt"])?
         {
-            return Err(MediationError::Interrupted);
+            return Err(MediationError::AuthorityLost);
         }
         Ok(())
     }
@@ -468,6 +484,13 @@ impl ConversationDispatcher {
         {
             return Err(ValidationError.into());
         }
+        if receipt["state"] == "failed" {
+            if !receipt["acknowledgement"].is_null() || !receipt["result"].is_null() {
+                return Err(ValidationError.into());
+            }
+            self.quarantine(id, r).await?;
+            return Ok(true);
+        }
         if receipt["state"] == "completed" {
             if r.result.as_ref() != Some(&receipt["result"]) {
                 return Err(ValidationError.into());
@@ -477,6 +500,35 @@ impl ConversationDispatcher {
             return Ok(true);
         }
         Ok(false)
+    }
+    async fn quarantine(&self, id: &str, r: &mut Record) -> Result<()> {
+        self.worker.cancel(id).await;
+        r.phase = "quarantined".into();
+        self.save(id, r)
+    }
+    async fn recover_pending(&self, id: &str, r: &mut Record) -> Result<bool> {
+        if self.reconcile_broker(id, r).await? {
+            return Ok(r.phase != "quarantined");
+        }
+        if r.phase != "completed" {
+            return Ok(false);
+        }
+        // Claims are not reissued while the original lease is active. Replay only
+        // the stored normalized output, never a worker/provider invocation.
+        self.authority(&r.binding, &r.lease).await?;
+        v::validate_result_with_admission(
+            r.result.as_ref().ok_or(ValidationError)?,
+            &r.binding,
+            &r.sources,
+            &self.worker.admission,
+        )?;
+        let update = r.update.as_ref().ok_or(ValidationError)?;
+        v::schema("update", update)?;
+        let ack = self
+            .broker(id, "updates", Some(&r.lease), Some(update))
+            .await?;
+        self.accept_ack(id, r, ack).await?;
+        Ok(true)
     }
     pub async fn run_once(&self) -> Result<bool> {
         let _guard = self.gate.lock().await;
@@ -490,26 +542,18 @@ impl ConversationDispatcher {
                 .and_then(|s| s.to_str())
                 .ok_or(ValidationError)?;
             if let Some(mut r) = self.load(id)? {
-                if r.result.is_some() && r.ack.is_none() {
-                    if self.reconcile_broker(id, &mut r).await? {
-                        return Ok(true);
-                    }
-                    if r.phase == "completed" {
-                        // A claim is not reissued during its active lease. Retry only the
-                        // durable normalized terminal update under the original authority.
-                        self.authority(&r.binding, &r.lease).await?;
-                        v::validate_result(
-                            r.result.as_ref().ok_or(ValidationError)?,
-                            &r.binding,
-                            &r.sources,
-                        )?;
-                        let update = r.update.as_ref().ok_or(ValidationError)?;
-                        v::schema("update", update)?;
-                        let ack = self
-                            .broker(id, "updates", Some(&r.lease), Some(update))
-                            .await?;
-                        self.accept_ack(id, &mut r, ack).await?;
-                        return Ok(true);
+                if r.result.is_some() && r.ack.is_none() && r.phase != "quarantined" {
+                    match self.recover_pending(id, &mut r).await {
+                        Ok(true) => return Ok(true),
+                        Ok(false) => (),
+                        Err(MediationError::State(e)) => return Err(e.into()),
+                        Err(e) => {
+                            if definitive_authority_loss(&e) {
+                                self.quarantine(id, &mut r).await?;
+                            }
+                            // Transport/malformed-receipt uncertainty remains durable and
+                            // fail closed for this task, but does not starve other rooms.
+                        }
                     }
                 }
             }
@@ -570,7 +614,12 @@ impl ConversationDispatcher {
                 validate_receipt(&receipt, &p)?;
                 if receipt["phase"] == "completed" {
                     validate_runtime(&receipt["runtimeBinding"])?;
-                    v::validate_result(&receipt["result"], &p, &r.sources)?;
+                    v::validate_result_with_admission(
+                        &receipt["result"],
+                        &p,
+                        &r.sources,
+                        &self.worker.admission,
+                    )?;
                     if r.result.as_ref().is_some_and(|v| v != &receipt["result"])
                         || r.runtime_binding
                             .as_ref()
@@ -668,7 +717,12 @@ impl ConversationDispatcher {
                 {
                     return Err(ValidationError.into());
                 }
-                v::validate_result(&data["reply"], &p, &r.sources)?;
+                v::validate_result_with_admission(
+                    &data["reply"],
+                    &p,
+                    &r.sources,
+                    &self.worker.admission,
+                )?;
                 r.result = Some(data["reply"].clone());
                 r.runtime_binding = Some(data["runtimeBinding"].clone());
             }

@@ -22,6 +22,10 @@ static SERIAL: Mutex<()> = Mutex::const_new(());
 struct Fixture(Arc<Mutex<Data>>);
 struct Data {
     packet: Value,
+    claimed: bool,
+    prior_receipts: BTreeMap<String, Value>,
+    prior_authority: BTreeMap<String, StatusCode>,
+    prior_authority_values: BTreeMap<String, Value>,
     receipt: Option<Value>,
     broker_ack: Value,
     sends: u32,
@@ -35,6 +39,8 @@ struct Data {
     slow: bool,
     drift: bool,
     citation: Option<String>,
+    actual_settings: Value,
+    actual_usage: Value,
     headers: Vec<String>,
 }
 fn reply(p: &Value) -> Value {
@@ -121,6 +127,10 @@ async fn worker(State(f): State<Fixture>, request: Request) -> Response {
     if let Some(citation) = &d.citation {
         r["result"]["citations"] = json!([citation]);
     }
+    if !d.actual_settings.is_null() {
+        r["result"]["effectiveSettings"] = d.actual_settings.clone();
+        r["result"]["usage"] = d.actual_usage.clone();
+    }
     d.receipt = Some(r.clone());
     let mut binding = r["runtimeBinding"].clone();
     if d.drift {
@@ -164,17 +174,28 @@ async fn broker(State(f): State<Fixture>, request: Request) -> Response {
         .unwrap();
     let mut d = f.0.lock().await;
     if path.ends_with("claim") {
-        if d.sends > 0 {
+        if d.claimed {
             return StatusCode::NO_CONTENT.into_response();
         }
+        d.claimed = true;
         let claim: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(claim["leaseOwner"], "fixture-owner");
         return Json(json!({"packet":d.packet,"leaseToken":"fixture-lease"})).into_response();
     }
+    let task = path.split('/').rev().nth(1).unwrap_or("");
     if path.ends_with("receipt") {
+        if let Some(prior) = d.prior_receipts.get(task) {
+            return Json(prior.clone()).into_response();
+        }
         return Json(json!({"profileVersion":PROFILE,"taskId":d.packet["taskId"],"conversationId":d.packet["conversation"]["id"],"generation":d.packet["conversation"]["generation"],"state":if d.broker_ack.is_null(){"reserved"}else{"completed"},"acknowledgement":d.broker_ack,"result":if d.broker_ack.is_null(){Value::Null}else{reply(&d.packet)}})).into_response();
     }
     if path.ends_with("authority") {
+        if let Some(value) = d.prior_authority_values.get(task) {
+            return Json(value.clone()).into_response();
+        }
+        if let Some(status) = d.prior_authority.get(task) {
+            return (*status).into_response();
+        }
         if d.revoked {
             return StatusCode::FORBIDDEN.into_response();
         }
@@ -221,6 +242,10 @@ async fn fixture_at(
     p["context"]["digest"] = json!(context_digest(&p).unwrap());
     let f = Fixture(Arc::new(Mutex::new(Data {
         packet: p,
+        claimed: false,
+        prior_receipts: BTreeMap::new(),
+        prior_authority: BTreeMap::new(),
+        prior_authority_values: BTreeMap::new(),
         receipt: None,
         broker_ack: Value::Null,
         sends: 0,
@@ -234,6 +259,8 @@ async fn fixture_at(
         slow: false,
         drift: false,
         citation: None,
+        actual_settings: Value::Null,
+        actual_usage: Value::Null,
         headers: vec![],
     })));
     let mut handles = vec![];
@@ -294,7 +321,11 @@ async fn fixture_at(
     let admission = Admission::new(
         "catalog-1".into(),
         "fixed-1".into(),
-        [("model-a".into(), vec!["effort-medium".into()])].into(),
+        [
+            ("model-a".into(), vec!["effort-medium".into()]),
+            ("model-b".into(), vec!["effort-medium".into()]),
+        ]
+        .into(),
     )
     .unwrap();
     let room = RoomGatewayClient::from_config_with_loopback_dns(&config, ip).unwrap();
@@ -468,7 +499,11 @@ async fn catalog_bridge_authenticates_admits_and_exposes_only_one_bounded_page()
     let admission = Admission::new(
         "catalog-1".into(),
         "fixed-1".into(),
-        [("model-a".into(), vec!["effort-medium".into()])].into(),
+        [
+            ("model-a".into(), vec!["effort-medium".into()]),
+            ("model-b".into(), vec!["effort-medium".into()]),
+        ]
+        .into(),
     )
     .unwrap();
     let worker = WorkerClient::with_loopback_dns(
@@ -620,6 +655,117 @@ async fn task_usage_artifact_and_card_redirect_drift_are_rejected() {
         f.0.lock().await.artifact_mode = Some(mode);
         assert!(d.run_once().await.is_err(), "{mode}");
         assert!(f.0.lock().await.broker_ack.is_null());
+        shutdown(handles).await;
+        std::fs::remove_dir_all(path).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn obsolete_or_temporarily_unreachable_completion_never_starves_another_room() {
+    let _serial = SERIAL.lock().await;
+    for scenario in ["failed", "revoked", "expired", "transient"] {
+        let (f, d, path, handles) = fixture().await;
+        f.0.lock().await.lose_before_accept = true;
+        if scenario == "expired" {
+            f.0.lock().await.packet["expiresAt"] =
+                json!((chrono::Utc::now() + chrono::Duration::milliseconds(700)).to_rfc3339());
+        }
+        assert!(d.run_once().await.is_err());
+        if scenario == "expired" {
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        }
+        let old_id;
+        {
+            let mut data = f.0.lock().await;
+            let old = data.packet.clone();
+            old_id = old["taskId"].as_str().unwrap().to_owned();
+            data.prior_receipts.insert(old_id.clone(),json!({"profileVersion":PROFILE,"taskId":old["taskId"],"conversationId":old["conversation"]["id"],"generation":old["conversation"]["generation"],"state":if scenario=="failed"{"failed"}else{"running"},"acknowledgement":null,"result":null}));
+            data.prior_authority.insert(
+                old_id.clone(),
+                if scenario == "transient" {
+                    StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    StatusCode::FORBIDDEN
+                },
+            );
+            if scenario == "expired" {
+                data.prior_authority_values.insert(old_id.clone(),json!({"profileVersion":PROFILE,"taskId":old["taskId"],"generation":old["conversation"]["generation"],"contextDigest":old["context"]["digest"],"expiresAt":old["expiresAt"],"authorizationExpiresAt":old["authorizationExpiresAt"]}));
+            }
+            let now = chrono::Utc::now();
+            data.packet["issuedAt"] = json!(now.to_rfc3339());
+            for k in ["expiresAt", "authorizationExpiresAt", "leaseExpiresAt"] {
+                data.packet[k] = json!((now + chrono::Duration::seconds(180)).to_rfc3339());
+            }
+            data.packet["taskId"] = json!(uuid::Uuid::new_v4());
+            data.packet["roomId"] = json!(uuid::Uuid::new_v4());
+            data.packet["conversation"]["id"] = json!(uuid::Uuid::new_v4());
+            data.packet["context"]["digest"] = json!(context_digest(&data.packet).unwrap());
+            data.claimed = false;
+            data.receipt = None;
+        }
+        assert!(d.run_once().await.unwrap(), "{scenario}");
+        let data = f.0.lock().await;
+        assert_eq!(data.sends, 2, "{scenario}");
+        assert!(!data.broker_ack.is_null());
+        assert_eq!(
+            data.updates
+                .iter()
+                .filter(|u| u["taskId"] == old_id)
+                .count(),
+            1,
+            "old result must not resend"
+        );
+        drop(data);
+        let record: Value =
+            serde_json::from_slice(&std::fs::read(path.join(format!("{old_id}.json"))).unwrap())
+                .unwrap();
+        assert_eq!(
+            record["phase"],
+            if scenario == "transient" {
+                "completed"
+            } else {
+                "quarantined"
+            }
+        );
+        shutdown(handles).await;
+        std::fs::remove_dir_all(path).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn bound_actual_settings_and_usage_are_admission_checked_without_changing_selected_defaults()
+{
+    let _serial = SERIAL.lock().await;
+    for scenario in ["admitted-change", "unknown-model", "wrong-usage-model"] {
+        let (f, d, path, handles) = fixture().await;
+        {
+            let mut data = f.0.lock().await;
+            data.actual_settings = json!({"model":if scenario=="unknown-model"{"unapproved"}else{"model-b"},"reasoningEffort":"effort-medium","confirmation":"confirmed","reroutedModel":null});
+            data.actual_usage = if scenario == "unknown-model" {
+                Value::Null
+            } else {
+                json!({"lastTotalTokens":1,"modelContextWindow":1000,"reportedAt":chrono::Utc::now().to_rfc3339(),"model":if scenario=="wrong-usage-model"{"model-a"}else{"model-b"},"freshness":"fresh"})
+            };
+        }
+        let result = d.run_once().await;
+        let data = f.0.lock().await;
+        if scenario == "admitted-change" {
+            assert!(result.unwrap());
+            assert_eq!(
+                data.updates.last().unwrap()["data"]["effectiveSettings"]["model"],
+                "model-b"
+            );
+            assert_eq!(
+                data.updates.last().unwrap()["data"]["usage"]["model"],
+                "model-b"
+            );
+            assert_eq!(data.packet["model"], "model-a");
+        } else {
+            assert!(result.is_err());
+            assert!(data.broker_ack.is_null());
+        }
+        assert_eq!(data.sends, 1);
+        drop(data);
         shutdown(handles).await;
         std::fs::remove_dir_all(path).unwrap();
     }

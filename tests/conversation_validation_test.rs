@@ -114,3 +114,45 @@ fn nullable_unconfirmed_settings_and_separate_reroute_metadata_are_accepted() {
     r["effectiveSettings"]["model"] = json!("unapproved-model");
     assert!(validate_result(&r, &p, &Default::default()).is_err());
 }
+
+#[test]
+fn task_deadline_cannot_outlive_lease_but_equal_boundary_is_valid() {
+    let mut p = packet();
+    p["leaseExpiresAt"] = p["expiresAt"].clone();
+    validate_packet(&p, &admission(), false).unwrap();
+    p["leaseExpiresAt"] = json!("2026-10-05T12:03:02Z");
+    assert!(validate_packet(&p, &admission(), false).is_err());
+}
+
+#[test]
+fn reported_settings_use_admitted_actual_model_and_usage_binding_without_changing_defaults() {
+    use thought_khoral_agent_gateway::conversation_validation::validate_result_with_admission;
+    let p = packet();
+    let mut r: Value = serde_json::from_str(include_str!(
+        "../contracts/agent-conversation-v1/fixtures/valid/result-last-usage.json"
+    ))
+    .unwrap();
+    let a = Admission::new(
+        "catalog-1".into(),
+        "fixed-1".into(),
+        [
+            ("model-a".into(), vec!["effort-medium".into()]),
+            ("model-b".into(), vec!["effort-medium".into()]),
+        ]
+        .into(),
+    )
+    .unwrap();
+    r["effectiveSettings"]["model"] = json!("model-b");
+    r["usage"]["model"] = json!("model-b");
+    validate_result_with_admission(&r, &p, &Default::default(), &a).unwrap();
+    assert_eq!(p["model"], "model-a");
+    r["usage"]["model"] = json!("model-a");
+    assert!(validate_result_with_admission(&r, &p, &Default::default(), &a).is_err());
+    r["effectiveSettings"]["model"] = json!("unapproved");
+    r["usage"] = Value::Null;
+    assert!(validate_result_with_admission(&r, &p, &Default::default(), &a).is_err());
+    r["effectiveSettings"]["model"] = json!("model-a");
+    r["effectiveSettings"]["reroutedModel"] = json!("reported-runtime-model");
+    r["usage"] = json!({"lastTotalTokens":1,"modelContextWindow":1000,"reportedAt":"2026-10-05T12:00:05Z","model":"reported-runtime-model","freshness":"fresh"});
+    validate_result_with_admission(&r, &p, &Default::default(), &a).unwrap();
+}

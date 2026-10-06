@@ -303,6 +303,7 @@ pub fn validate_packet_with_sources(
     let lease = timestamp(&p["leaseExpiresAt"])?;
     if issued >= expires
         || expires > auth
+        || expires > lease
         || expires - issued > chrono::Duration::seconds(180)
         || lease <= issued
         || (current && (Utc::now() >= expires || Utc::now() >= auth || Utc::now() >= lease))
@@ -333,6 +334,22 @@ pub fn sources(p: &Value) -> BTreeSet<String> {
         .collect()
 }
 pub fn validate_result(r: &Value, p: &Value, prior: &BTreeSet<String>) -> Checked<()> {
+    validate_result_policy(r, p, prior, None)
+}
+pub fn validate_result_with_admission(
+    r: &Value,
+    p: &Value,
+    prior: &BTreeSet<String>,
+    admission: &Admission,
+) -> Checked<()> {
+    validate_result_policy(r, p, prior, Some(admission))
+}
+fn validate_result_policy(
+    r: &Value,
+    p: &Value,
+    prior: &BTreeSet<String>,
+    admission: Option<&Admission>,
+) -> Checked<()> {
     schema("result", r)?;
     if r["conversationId"] != p["conversation"]["id"]
         || r["generation"] != p["conversation"]["generation"]
@@ -355,9 +372,26 @@ pub fn validate_result(r: &Value, p: &Value, prior: &BTreeSet<String>) -> Checke
     let settings = &r["effectiveSettings"];
     if !settings.is_null() {
         let confirmed = settings["confirmation"] == "confirmed";
-        for key in ["model", "reasoningEffort"] {
-            if (confirmed || !settings[key].is_null()) && settings[key] != p[key] {
+        if confirmed && (settings["model"].is_null() || settings["reasoningEffort"].is_null()) {
+            return Err(ValidationError);
+        }
+        if let Some(admission) = admission {
+            if let Some(model) = settings["model"].as_str() {
+                let efforts = admission.models.get(model).ok_or(ValidationError)?;
+                if settings["reasoningEffort"]
+                    .as_str()
+                    .is_some_and(|e| !efforts.iter().any(|v| v == e))
+                {
+                    return Err(ValidationError);
+                }
+            } else if !settings["reasoningEffort"].is_null() {
                 return Err(ValidationError);
+            }
+        } else {
+            for key in ["model", "reasoningEffort"] {
+                if !settings[key].is_null() && settings[key] != p[key] {
+                    return Err(ValidationError);
+                }
             }
         }
         if settings["reroutedModel"]
@@ -367,9 +401,16 @@ pub fn validate_result(r: &Value, p: &Value, prior: &BTreeSet<String>) -> Checke
             return Err(ValidationError);
         }
     }
+    let reported_model = if !settings["reroutedModel"].is_null() {
+        &settings["reroutedModel"]
+    } else if !settings["model"].is_null() {
+        &settings["model"]
+    } else {
+        &p["model"]
+    };
     let usage = &r["usage"];
     if !usage.is_null()
-        && (usage["model"] != p["model"]
+        && (usage["model"] != *reported_model
             || (usage["freshness"] == "fresh" && usage["modelContextWindow"].is_null())
             || timestamp(&usage["reportedAt"])? < timestamp(&p["issuedAt"])?
             || timestamp(&usage["reportedAt"])? > timestamp(&p["expiresAt"])?)
