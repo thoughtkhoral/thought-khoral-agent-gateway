@@ -156,3 +156,21 @@ fn reported_settings_use_admitted_actual_model_and_usage_binding_without_changin
     r["usage"] = json!({"lastTotalTokens":1,"modelContextWindow":1000,"reportedAt":"2026-10-05T12:00:05Z","model":"reported-runtime-model","freshness":"fresh"});
     validate_result_with_admission(&r, &p, &Default::default(), &a).unwrap();
 }
+
+#[test]
+fn missing_usage_window_requires_unavailable_while_positive_windows_allow_stale_or_unavailable() {
+    let p = packet();
+    let mut r: Value = serde_json::from_str(include_str!(
+        "../contracts/agent-conversation-v1/fixtures/valid/result-last-usage.json"
+    ))
+    .unwrap();
+    r["usage"]["freshness"] = json!("stale");
+    r["usage"]["modelContextWindow"] = Value::Null;
+    assert!(validate_result(&r, &p, &Default::default()).is_err());
+    r["usage"]["freshness"] = json!("unavailable");
+    validate_result(&r, &p, &Default::default()).unwrap();
+    r["usage"]["modelContextWindow"] = json!(1000);
+    validate_result(&r, &p, &Default::default()).unwrap();
+    r["usage"]["freshness"] = json!("stale");
+    validate_result(&r, &p, &Default::default()).unwrap();
+}

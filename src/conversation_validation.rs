@@ -411,7 +411,7 @@ fn validate_result_policy(
     let usage = &r["usage"];
     if !usage.is_null()
         && (usage["model"] != *reported_model
-            || (usage["freshness"] == "fresh" && usage["modelContextWindow"].is_null())
+            || (usage["freshness"] != "unavailable" && usage["modelContextWindow"].is_null())
             || timestamp(&usage["reportedAt"])? < timestamp(&p["issuedAt"])?
             || timestamp(&usage["reportedAt"])? > timestamp(&p["expiresAt"])?)
     {
