@@ -7,6 +7,8 @@ remote-agent admission or production service.
 
 See the [root specification index](https://github.com/thoughtkhoral/thought-khoral/blob/main/.ai/specs/README.md).
 
+For the coordinated Codex conversation status across all projects, see the [shared status guide](https://github.com/thoughtkhoral/thought-khoral/blob/main/docs/codex-conversation-status.md).
+
 ## Local areas
 
 - [What: deferred agent gateway (superseded for the local foundation)](what/deferred-agent-gateway.md)

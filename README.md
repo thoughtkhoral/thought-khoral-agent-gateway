@@ -10,10 +10,11 @@ The local foundation is runnable only through the sibling ThoughtKhoral
 platform's rootless development stack. See [the verification
 procedure](docs/verification/a2a-foundation.md). It accepts exactly the pinned
 Reference Agent and its two deterministic skills by default. The approved
-[Codex mediation extension](.ai/specs/how/codex-mediation.md) is implemented on
-an isolated local branch, with provider-free verification described in
-[the mediation checks](docs/verification/codex-mediation.md). It remains opt-in;
-platform activation and live provider verification are later plan tasks.
+[Codex mediation extension](.ai/specs/how/codex-mediation.md) is merged and
+pushed to GitHub `main` at `efb29b3f9afa3ed51ddad409a66cd48cf8bf59dd`.
+Provider-free mediator tests passed. Codex remains opt-in; packaged-stack and
+separately authorized live-provider verification remain open. See the [shared
+status guide](https://github.com/thoughtkhoral/thought-khoral/blob/main/docs/codex-conversation-status.md) for the cross-project state and remaining gates.
 
 The gateway pins a reviewed retained-v1 room contract revision in
 [`contracts/lock.json`](contracts/lock.json). Its authenticated internal task
