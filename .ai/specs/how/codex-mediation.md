@@ -191,3 +191,10 @@ published v1.0 conversation profile; the unreleased v1.1 candidate is consumed
 by contracts, broker, and UI only. Fresh serial `cargo test --locked --offline`
 passed. Publication, packaged-stack verification, provider use, activation and
 push remain separate gates.
+
+## Pushed POC checkpoint — 2026-10-07
+
+The reviewed mediator implementation is pushed to GitHub `main` in
+`efb29b3f9afa3ed51ddad409a66cd48cf8bf59dd`. Provider-free tests passed in the
+reviewed source. Packaged-stack, identity/browser, and separately authorized
+live verification remain open; production readiness is not claimed.

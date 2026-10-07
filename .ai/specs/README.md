@@ -52,3 +52,11 @@ After explicit user authorization, the reviewed mediator source at
 The mediator continues to consume the published v1.0 profile; publication,
 provider use, service activation, packaged-stack verification, and push remain
 separate gates. Verification is recorded in the owning How.
+
+## Current POC publication checkpoint — 2026-10-07
+
+The reviewed Codex conversation mediator is pushed to GitHub `main` at
+`efb29b3f9afa3ed51ddad409a66cd48cf8bf59dd`. Provider-free mediator tests passed
+in the reviewed source. Packaged-stack, identity/browser, and separately
+authorized live verification remain open; this experimental POC is not claimed
+production-ready.
