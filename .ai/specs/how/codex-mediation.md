@@ -80,3 +80,18 @@ usage semantics. The coordinated plan records the final reviewed revisions and
 worker image evidence. These changes remain local and unmerged, with configuration
 disabled by default. UI, opt-in activation and full-stack/provider verification
 remain Tasks 7–9. No live provider, tool isolation or egress coverage is claimed.
+
+
+## Safe failed-turn projection clarification (2026-10-07)
+
+JSON-RPC negative error codes are envelope metadata, parsed separately from
+strict nonnegative profile values. Duplicate/unknown envelope keys, mismatched
+RPC IDs, mixed result/error envelopes, fractional/unsafe counters, and unknown
+error strings cannot authorize success or a specific safe failure. A known
+worker rejection is forwarded only after an authenticated receipt read matches
+the requested task, conversation and generation, is terminal failed/interrupted,
+and has the same bounded profile error code with no result, acknowledgement or
+runtime binding. The same strict receipt rule applies to recovered failures.
+Transport/malformed/unknown states remain conversation_interrupted. Raw error
+text never becomes a broker update or public message; no profile artifact or
+counter validation changes.

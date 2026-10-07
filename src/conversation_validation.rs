@@ -115,6 +115,71 @@ pub fn parse_json(bytes: &[u8]) -> Checked<Value> {
         .map(|v| v.0)
         .map_err(|_| ValidationError)
 }
+// JSON-RPC error codes are signed envelope metadata. Profile values retain
+// the same strict nonnegative safe-integer decoder (including nested results).
+pub(crate) fn parse_rpc_json(bytes: &[u8]) -> Checked<Value> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Envelope {
+        jsonrpc: String,
+        id: String,
+        #[serde(default, deserialize_with = "present_result")]
+        result: Option<Strict>,
+        #[serde(default, deserialize_with = "present_error")]
+        error: Option<RpcError>,
+    }
+    fn present_result<'de, D: Deserializer<'de>>(decoder: D) -> Result<Option<Strict>, D::Error> {
+        Strict::deserialize(decoder).map(Some)
+    }
+    fn present_error<'de, D: Deserializer<'de>>(decoder: D) -> Result<Option<RpcError>, D::Error> {
+        RpcError::deserialize(decoder).map(Some)
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RpcError {
+        code: i64,
+        message: String,
+        data: Option<Strict>,
+    }
+    if bytes.len() > 4 * 1_048_576 {
+        return Err(ValidationError);
+    }
+    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|_| ValidationError)?;
+    let mut value = json!({"jsonrpc":envelope.jsonrpc,"id":envelope.id});
+    match (envelope.result, envelope.error) {
+        (Some(result), None) => value["result"] = result.0,
+        (None, Some(error))
+            if (-9_007_199_254_740_991..0).contains(&error.code) && error.message.len() <= 256 =>
+        {
+            value["error"] = json!({"code":error.code,"message":error.message});
+            if let Some(data) = error.data {
+                value["error"]["data"] = data.0;
+            }
+        }
+        _ => return Err(ValidationError),
+    }
+    Ok(value)
+}
+pub(crate) fn safe_failure_code(code: &str) -> Option<&'static str> {
+    [
+        "invalid_task_input",
+        "forbidden",
+        "conversation_busy",
+        "conversation_stale",
+        "context_mismatch",
+        "context_too_large",
+        "runtime_unavailable",
+        "authentication_required",
+        "session_unavailable",
+        "timeout",
+        "conversation_interrupted",
+        "execution_failed",
+        "duplicate_conflict",
+    ]
+    .into_iter()
+    .find(|known| *known == code)
+}
+
 pub fn canonical_bytes(v: &Value) -> Checked<Vec<u8>> {
     fn sorted(v: &Value) -> Checked<Value> {
         Ok(match v {
@@ -418,4 +483,21 @@ fn validate_result_policy(
         return Err(ValidationError);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod rpc_tests {
+    use super::*;
+    #[test]
+    fn signed_rpc_metadata_does_not_relax_profile_counters() {
+        assert!(parse_rpc_json(br#"{"jsonrpc":"2.0","id":"id","error":{"code":-32600,"message":"execution_failed"}}"#).is_ok());
+        for bytes in [br#"{"jsonrpc":"2.0","id":"id","result":{"generation":-1}}"#.as_slice(),
+            br#"{"jsonrpc":"2.0","id":"id","result":{"generation":1.0}}"#,
+            br#"{"jsonrpc":"2.0","id":"id","error":{"code":-32600,"code":-32603,"message":"execution_failed"}}"#,
+            br#"{"jsonrpc":"2.0","id":"id","error":{"code":-32600,"message":"execution_failed","data":{"generation":-1}}}"#] {
+            assert!(parse_rpc_json(bytes).is_err());
+        }
+        assert!(parse_rpc_json(br#"{"jsonrpc":"2.0","id":"id","result":null,"error":{"code":-32600,"message":"execution_failed"}}"#).is_err());
+        assert!(parse_json(br#"{"code":-32600}"#).is_err());
+    }
 }

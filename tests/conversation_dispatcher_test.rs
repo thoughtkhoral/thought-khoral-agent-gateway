@@ -35,6 +35,7 @@ struct Data {
     lost_ack: bool,
     lose_before_accept: bool,
     artifact_mode: Option<&'static str>,
+    failure_mode: Option<&'static str>,
     revoked: bool,
     slow: bool,
     drift: bool,
@@ -117,6 +118,56 @@ async fn worker(State(f): State<Fixture>, request: Request) -> Response {
         1
     );
     d.sends += 1;
+    if let Some(mode) = d.failure_mode {
+        let known = matches!(
+            mode,
+            "execution_failed"
+                | "session_unavailable"
+                | "runtime_unavailable"
+                | "authentication_required"
+                | "timeout"
+        );
+        let code = if known { mode } else { "execution_failed" };
+        let mut failed = receipt(&d.packet, "failed");
+        failed["error"] = json!(code);
+        if mode == "wrong-task" {
+            failed["taskId"] = json!(uuid::Uuid::new_v4());
+        }
+        if mode == "wrong-generation" {
+            failed["generation"] = json!(2);
+        }
+        if mode == "not-terminal" {
+            failed["phase"] = json!("running");
+        }
+        if mode == "unexpected-result" {
+            failed["result"] = reply(&d.packet);
+        }
+        if mode == "unknown-code" {
+            failed["error"] = json!("PRIVATE-UNKNOWN-ERROR");
+        }
+        d.receipt = Some(failed);
+        if mode == "transport" {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+        if mode == "malformed" {
+            return "{invalid-json".into_response();
+        }
+        let mut envelope =
+            json!({"jsonrpc":"2.0","id":rpc["id"],"error":{"code":-32600,"message":code}});
+        if mode == "wrong-id" {
+            envelope["id"] = json!("wrong-rpc-id");
+        }
+        if mode == "unknown-code" {
+            envelope["error"]["message"] = json!("PRIVATE-UNKNOWN-ERROR");
+        }
+        if mode == "unexpected-error-field" {
+            envelope["error"]["private"] = json!("PRIVATE-ERROR-DATA");
+        }
+        if mode == "mixed-envelope" {
+            envelope["result"] = json!({});
+        }
+        return Json(envelope).into_response();
+    }
     let slow = d.slow;
     drop(d);
     if slow {
@@ -255,6 +306,7 @@ async fn fixture_at(
         lost_ack: false,
         lose_before_accept: false,
         artifact_mode: None,
+        failure_mode: None,
         revoked: false,
         slow: false,
         drift: false,
@@ -768,5 +820,62 @@ async fn bound_actual_settings_and_usage_are_admission_checked_without_changing_
         drop(data);
         shutdown(handles).await;
         std::fs::remove_dir_all(path).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn safe_rpc_failure_requires_matching_terminal_receipt() {
+    let _serial = SERIAL.lock().await;
+    for mode in [
+        "execution_failed",
+        "session_unavailable",
+        "runtime_unavailable",
+        "authentication_required",
+        "timeout",
+        "wrong-task",
+        "wrong-generation",
+        "not-terminal",
+        "unexpected-result",
+        "unknown-code",
+        "transport",
+        "malformed",
+        "wrong-id",
+        "unexpected-error-field",
+        "mixed-envelope",
+    ] {
+        let (f, dispatcher, path, handles) = fixture().await;
+        f.0.lock().await.failure_mode = Some(mode);
+        let _ = dispatcher.run_once().await;
+        let data = f.0.lock().await;
+        let expected = if matches!(
+            mode,
+            "execution_failed"
+                | "session_unavailable"
+                | "runtime_unavailable"
+                | "authentication_required"
+                | "timeout"
+        ) {
+            mode
+        } else {
+            "conversation_interrupted"
+        };
+        assert_eq!(
+            data.updates.last().unwrap()["data"]["code"],
+            expected,
+            "{mode}"
+        );
+        assert_eq!(data.sends, 1, "{mode} retried native submission");
+        assert_eq!(data.worker_acks, 0);
+        assert!(
+            !serde_json::to_string(&data.updates)
+                .unwrap()
+                .contains("PRIVATE")
+        );
+        drop(data);
+        std::fs::remove_dir_all(path).unwrap();
+        for handle in handles {
+            handle.abort();
+            let _ = handle.await;
+        }
     }
 }

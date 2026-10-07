@@ -25,6 +25,8 @@ pub enum MediationError {
     Interrupted,
     #[error("broker task authority has expired or been revoked")]
     AuthorityLost,
+    #[error("worker rejected the task with a safe code")]
+    WorkerRejected(&'static str),
 }
 fn definitive_authority_loss(error: &MediationError) -> bool {
     matches!(error, MediationError::AuthorityLost)
@@ -96,7 +98,11 @@ impl WorkerClient {
         if status == StatusCode::NO_CONTENT {
             return Ok(None);
         }
-        let value = v::parse_json(&bytes)?;
+        let value = if path == "/" {
+            v::parse_rpc_json(&bytes)?
+        } else {
+            v::parse_json(&bytes)?
+        };
         if status == StatusCode::BAD_REQUEST
             && path.starts_with("/control/v1/receipts/")
             && value == json!({"code":"invalid_task_input"})
@@ -191,8 +197,15 @@ impl WorkerClient {
             )
             .await?
             .ok_or(ValidationError)?;
-        if response["jsonrpc"] != "2.0" || response["id"] != id || response.get("error").is_some() {
+        if response["jsonrpc"] != "2.0" || response["id"] != id {
             return Err(MediationError::Interrupted);
+        }
+        if let Some(error) = response.get("error") {
+            return Err(error["message"]
+                .as_str()
+                .and_then(v::safe_failure_code)
+                .map(MediationError::WorkerRejected)
+                .unwrap_or(MediationError::Interrupted));
         }
         response
             .get("result")
@@ -268,6 +281,17 @@ fn validate_receipt(r: &Value, p: &Value) -> Result<()> {
         return Err(ValidationError.into());
     }
     Ok(())
+}
+fn receipt_failure(receipt: &Value, packet: &Value) -> Option<&'static str> {
+    validate_receipt(receipt, packet).ok()?;
+    if !matches!(receipt["phase"].as_str(), Some("failed" | "interrupted"))
+        || !receipt["result"].is_null()
+        || !receipt["acknowledgement"].is_null()
+        || !receipt["runtimeBinding"].is_null()
+    {
+        return None;
+    }
+    v::safe_failure_code(receipt["error"].as_str()?)
 }
 fn validate_runtime(r: &Value) -> Result<()> {
     if !closed(r, &["threadId", "turnId"])
@@ -630,8 +654,9 @@ impl ConversationDispatcher {
                     r.result = Some(receipt["result"].clone());
                     r.runtime_binding = Some(receipt["runtimeBinding"].clone());
                 } else {
+                    let code = receipt_failure(&receipt, &p).unwrap_or("conversation_interrupted");
                     self.worker.cancel(id).await;
-                    return self.fail(id, &p, lease, &mut r).await;
+                    return self.fail_with_code(id, &p, lease, &mut r, code).await;
                 }
             }
             Err(_) => {
@@ -674,6 +699,17 @@ impl ConversationDispatcher {
                 let output = match output {
                     Ok(v) => v,
                     Err(e) => {
+                        // An RPC message alone cannot establish task authority. Only
+                        // its matching authenticated terminal receipt can confirm a
+                        // bounded safe code. Transport/malformed uncertainty stays
+                        // interrupted, regardless of any provider error text.
+                        if let MediationError::WorkerRejected(code) = &e {
+                            if let Ok(Some(receipt)) = self.worker.receipt(id).await {
+                                if receipt_failure(&receipt, &p) == Some(*code) {
+                                    return self.fail_with_code(id, &p, lease, &mut r, code).await;
+                                }
+                            }
+                        }
                         self.worker.cancel(id).await;
                         r.phase = "interrupted".into();
                         self.save(id, &r)?;
@@ -749,12 +785,20 @@ impl ConversationDispatcher {
         Ok(true)
     }
     async fn fail(&self, id: &str, p: &Value, lease: &str, r: &mut Record) -> Result<bool> {
+        self.fail_with_code(id, p, lease, r, "conversation_interrupted")
+            .await
+    }
+    async fn fail_with_code(
+        &self,
+        id: &str,
+        p: &Value,
+        lease: &str,
+        r: &mut Record,
+        code: &str,
+    ) -> Result<bool> {
+        let code = v::safe_failure_code(code).ok_or(ValidationError)?;
         r.phase = "interrupted".into();
-        r.update = Some(Self::update(
-            p,
-            "failed",
-            json!({"code":"conversation_interrupted"}),
-        ));
+        r.update = Some(Self::update(p, "failed", json!({"code":code})));
         self.save(id, r)?;
         let update = r.update.as_ref().ok_or(ValidationError)?;
         v::schema("update", update)?;
