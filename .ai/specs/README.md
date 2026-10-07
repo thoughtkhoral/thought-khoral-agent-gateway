@@ -44,3 +44,11 @@ and the [coordinated candidate checkpoint](https://github.com/thoughtkhoral/thou
 It adds behavior in the broker, contracts, UI and platform candidate branches.
 This mediator remains on the published v1.0 profile and required no runtime
 change for defaults discovery.
+
+## Local main integration checkpoint — 2026-10-07
+
+After explicit user authorization, the reviewed mediator source at
+`6c3d96b4763871b9addc9bc7223e71ee7d38abd9` was merged into local `main`.
+The mediator continues to consume the published v1.0 profile; publication,
+provider use, service activation, packaged-stack verification, and push remain
+separate gates. Verification is recorded in the owning How.

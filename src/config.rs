@@ -69,6 +69,7 @@ pub struct GatewayConfig {
     client_credentials: ClientCredentialsConfig,
     allowed_handoff_hosts: BTreeSet<String>,
     poll_millis: u64,
+    codex: Option<CodexConfig>,
 }
 
 impl GatewayConfig {
@@ -124,7 +125,10 @@ impl GatewayConfig {
         let poll_millis =
             parse_bounded_u64(&environment, "THOUGHT_KHORAL_AGENT_POLL_MILLIS", 100, 5_000)?;
 
+        let codex =
+            CodexConfig::parse(&environment, client_secret, reference_agent_inbound_secret)?;
         Ok(Self {
+            codex,
             room_gateway_origin,
             client_credentials: ClientCredentialsConfig {
                 token_url,
@@ -134,6 +138,10 @@ impl GatewayConfig {
             allowed_handoff_hosts,
             poll_millis,
         })
+    }
+
+    pub fn codex(&self) -> Option<&CodexConfig> {
+        self.codex.as_ref()
     }
 
     pub fn from_process_env() -> Result<Self, ConfigError> {
@@ -159,6 +167,10 @@ impl GatewayConfig {
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    #[error(
+        "invalid Codex opt-in, private state, credential, or reviewed model policy configuration"
+    )]
+    InvalidCodexConfig,
     #[error(
         "{0} is unsupported; lease duration is broker-owned and progress has a fixed three-update bound"
     )]
@@ -315,5 +327,111 @@ fn is_loopback(url: &Url) -> bool {
         Some(Host::Ipv6(address)) => address.is_loopback(),
         Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
         None => false,
+    }
+}
+
+#[derive(Clone)]
+pub struct CodexConfig {
+    state_dir: std::path::PathBuf,
+    secret: String,
+    bridge_secret: String,
+    admission: crate::conversation_validation::Admission,
+}
+impl std::fmt::Debug for CodexConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodexConfig")
+            .field("state_dir", &self.state_dir)
+            .field("admission", &self.admission)
+            .field("secret", &"[REDACTED]")
+            .finish()
+    }
+}
+impl CodexConfig {
+    fn parse(
+        env: &BTreeMap<String, String>,
+        client_secret: &str,
+        reference_secret: &str,
+    ) -> Result<Option<Self>, ConfigError> {
+        for key in [
+            "THOUGHT_KHORAL_CODEX_ENDPOINT",
+            "THOUGHT_KHORAL_CODEX_CARD_URL",
+        ] {
+            if env.contains_key(key) {
+                return Err(ConfigError::InvalidCodexConfig);
+            }
+        }
+        match env.get("THOUGHT_KHORAL_CODEX_ENABLED").map(String::as_str) {
+            None | Some("false") => return Ok(None),
+            Some("true") => (),
+            _ => return Err(ConfigError::InvalidCodexConfig),
+        }
+        let secret = required(env, "THOUGHT_KHORAL_CODEX_INVOCATION_SECRET")?;
+        if secret == client_secret
+            || secret == reference_secret
+            || secret.len() < 16
+            || secret.len() > 4096
+            || !secret.bytes().all(|b| b.is_ascii_graphic())
+        {
+            return Err(ConfigError::InvalidCodexConfig);
+        }
+        let bridge_secret = required(env, "THOUGHT_KHORAL_CODEX_CATALOG_BRIDGE_SECRET")?;
+        if bridge_secret == secret
+            || bridge_secret == client_secret
+            || bridge_secret == reference_secret
+            || bridge_secret.len() < 32
+            || bridge_secret.len() > 4096
+            || !bridge_secret
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-._~+/=".contains(&b))
+        {
+            return Err(ConfigError::InvalidCodexConfig);
+        }
+        if required(env, "THOUGHT_KHORAL_CODEX_CATALOG_BRIDGE_BIND")? != "0.0.0.0:9092" {
+            return Err(ConfigError::InvalidCodexConfig);
+        }
+        let state_dir = std::path::PathBuf::from(required(env, "THOUGHT_KHORAL_CODEX_STATE_DIR")?);
+        if !state_dir.is_absolute() {
+            return Err(ConfigError::InvalidCodexConfig);
+        }
+        let model_json = crate::conversation_validation::parse_json(
+            required(env, "THOUGHT_KHORAL_CODEX_MODEL_POLICY_JSON")?.as_bytes(),
+        )
+        .map_err(|_| ConfigError::InvalidCodexConfig)?;
+        let models =
+            serde_json::from_value(model_json).map_err(|_| ConfigError::InvalidCodexConfig)?;
+        let admission = crate::conversation_validation::Admission::new(
+            required(env, "THOUGHT_KHORAL_CODEX_CATALOG_REVISION")?.to_owned(),
+            required(env, "THOUGHT_KHORAL_CODEX_GUIDANCE_REVISION")?.to_owned(),
+            models,
+        )
+        .map_err(|_| ConfigError::InvalidCodexConfig)?;
+        Ok(Some(Self {
+            state_dir,
+            secret: secret.to_owned(),
+            bridge_secret: bridge_secret.to_owned(),
+            admission,
+        }))
+    }
+    pub fn catalog_router(
+        &self,
+    ) -> Result<axum::Router, crate::conversation_dispatcher::MediationError> {
+        crate::conversation_catalog::catalog_service(
+            self.worker_client()?,
+            self.bridge_secret.clone(),
+        )
+    }
+    pub fn state_dir(&self) -> &std::path::Path {
+        &self.state_dir
+    }
+    pub fn worker_client(
+        &self,
+    ) -> Result<
+        crate::conversation_dispatcher::WorkerClient,
+        crate::conversation_dispatcher::MediationError,
+    > {
+        crate::conversation_dispatcher::WorkerClient::new(
+            self.secret.clone(),
+            self.admission.clone(),
+        )
     }
 }

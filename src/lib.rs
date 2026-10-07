@@ -23,3 +23,7 @@ pub use registry::{
     PinnedAgentRegistration, RegisteredAgent, RegistryError, SkillId, reference_registration,
 };
 pub use room_client::{RoomClientError, RoomGatewayClient};
+
+pub mod conversation_catalog;
+pub mod conversation_dispatcher;
+pub mod conversation_validation;

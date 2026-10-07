@@ -2,7 +2,7 @@ use std::{error::Error, time::Duration};
 
 use thought_khoral_agent_gateway::{
     GatewayConfig, RegisteredAgent, RoomGatewayClient, a2a_adapter::A2aAdapter,
-    dispatcher::Dispatcher,
+    conversation_dispatcher::ConversationDispatcher, dispatcher::Dispatcher,
 };
 use uuid::Uuid;
 
@@ -31,8 +31,39 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Uuid::new_v4(),
         Duration::from_secs(1),
     );
-    dispatcher
-        .run_forever(Duration::from_millis(config.poll_millis()))
-        .await?;
+    if let Some(codex) = config.codex() {
+        let conversations = ConversationDispatcher::new(
+            RoomGatewayClient::from_config(&config)?,
+            codex.worker_client()?,
+            codex.state_dir().to_path_buf(),
+            Uuid::new_v4().to_string(),
+        )?;
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:9092").await?;
+        let catalog_router = codex.catalog_router()?;
+        // Admission is opt-in and independent of the deterministic reference path.
+        tokio::try_join!(
+            async {
+                dispatcher
+                    .run_forever(Duration::from_millis(config.poll_millis()))
+                    .await
+                    .map_err(|e| -> Box<dyn Error> { Box::new(e) })
+            },
+            async {
+                conversations
+                    .run_forever(Duration::from_millis(config.poll_millis()))
+                    .await
+                    .map_err(|e| -> Box<dyn Error> { Box::new(e) })
+            },
+            async {
+                axum::serve(listener, catalog_router)
+                    .await
+                    .map_err(|e| -> Box<dyn Error> { Box::new(e) })
+            }
+        )?;
+    } else {
+        dispatcher
+            .run_forever(Duration::from_millis(config.poll_millis()))
+            .await?;
+    }
     Ok(())
 }

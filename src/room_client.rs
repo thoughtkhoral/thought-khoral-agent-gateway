@@ -101,6 +101,64 @@ impl RoomGatewayClient {
         })
     }
 
+    /// Loopback DNS injection for protocol fixtures; endpoint authorities remain pinned.
+    pub fn from_config_with_loopback_dns(
+        config: &GatewayConfig,
+        ip: std::net::IpAddr,
+    ) -> Result<Self, RoomClientError> {
+        if !ip.is_loopback() {
+            return Err(RoomClientError::InvalidConfiguredOrigin);
+        }
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(Policy::none())
+            .timeout(std::time::Duration::from_secs(5))
+            .resolve("thought-khoral-room-gateway", (ip, 8080).into())
+            .resolve("thought-khoral-keycloak", (ip, 8080).into())
+            .build()?;
+        Ok(Self {
+            origin: config.room_gateway_origin().as_url().clone(),
+            client: client.clone(),
+            token_provider: Arc::new(ClientCredentialsTokenProvider {
+                client,
+                credentials: config.client_credentials().clone(),
+            }),
+        })
+    }
+    pub async fn conversation_request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        lease: Option<&str>,
+        body: Option<&serde_json::Value>,
+    ) -> Result<Option<serde_json::Value>, RoomClientError> {
+        let mut request = self
+            .authorized(self.client.request(
+                method,
+                self.endpoint(&format!("internal/agent-conversations/v1/{path}"))?,
+            ))
+            .await?;
+        if let Some(lease) = lease {
+            request = request.header(LEASE_TOKEN_HEADER, lease);
+        }
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let mut response = request.send().await?.error_for_status()?;
+        if response.status() == StatusCode::NO_CONTENT {
+            return Ok(None);
+        }
+        let mut bytes = vec![];
+        while let Some(chunk) = response.chunk().await? {
+            if bytes.len() + chunk.len() > 2_097_152 {
+                return Err(RoomClientError::InvalidConversationResponse);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        crate::conversation_validation::parse_json(&bytes)
+            .map(Some)
+            .map_err(|_| RoomClientError::InvalidConversationResponse)
+    }
     #[cfg(test)]
     fn for_test(origin: Url, token_provider: Arc<dyn ServiceTokenProvider>) -> Self {
         Self {
@@ -203,6 +261,8 @@ struct TokenResponse {
 pub enum RoomClientError {
     #[error("configured room-gateway origin cannot form an internal endpoint")]
     InvalidConfiguredOrigin,
+    #[error("invalid or oversized conversation response")]
+    InvalidConversationResponse,
     #[error("Keycloak returned an empty service access token")]
     EmptyServiceToken,
     #[error("HTTP client request failed")]

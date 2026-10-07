@@ -131,3 +131,42 @@ fn test_env(card_url: &str, selected_handoff_host: &str) -> BTreeMap<String, Str
     .map(|(key, value)| (key.to_owned(), value.to_owned()))
     .collect()
 }
+
+#[test]
+fn codex_is_opt_in_and_requires_distinct_bounded_credentials_and_reviewed_policy() {
+    let mut env = test_env("http://127.0.0.1:9090", "allowed.example");
+    assert!(GatewayConfig::parse(env.clone()).unwrap().codex().is_none());
+    env.insert("THOUGHT_KHORAL_CODEX_ENABLED".into(), "true".into());
+    assert!(GatewayConfig::parse(env.clone()).is_err());
+    for (k, v) in [
+        (
+            "THOUGHT_KHORAL_CODEX_STATE_DIR",
+            "/private/tmp/codex-mediation",
+        ),
+        (
+            "THOUGHT_KHORAL_CODEX_CATALOG_BRIDGE_SECRET",
+            "distinct-catalog-bridge-secret-32-chars",
+        ),
+        ("THOUGHT_KHORAL_CODEX_CATALOG_BRIDGE_BIND", "0.0.0.0:9092"),
+        (
+            "THOUGHT_KHORAL_CODEX_INVOCATION_SECRET",
+            "distinct-invocation-secret",
+        ),
+        (
+            "THOUGHT_KHORAL_CODEX_MODEL_POLICY_JSON",
+            r#"{"model-a":["effort-medium"]}"#,
+        ),
+        ("THOUGHT_KHORAL_CODEX_CATALOG_REVISION", "catalog-1"),
+        ("THOUGHT_KHORAL_CODEX_GUIDANCE_REVISION", "fixed-1"),
+    ] {
+        env.insert(k.into(), v.into());
+    }
+    let config = GatewayConfig::parse(env.clone()).unwrap();
+    assert!(config.codex().is_some());
+    assert!(!format!("{config:?}").contains("distinct-invocation-secret"));
+    env.insert(
+        "THOUGHT_KHORAL_CODEX_ENDPOINT".into(),
+        "http://attacker.invalid".into(),
+    );
+    assert!(GatewayConfig::parse(env).is_err());
+}

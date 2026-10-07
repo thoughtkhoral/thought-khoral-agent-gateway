@@ -1,7 +1,7 @@
 # ThoughtKhoral agent gateway
 
 `thought-khoral-agent-gateway` is the mediated boundary between governed rooms
-and the locally controlled deterministic A2A reference agent. It uses the Room
+and admitted local A2A agents. It uses the Room
 Context Broker and is intentionally not a general remote-agent or MCP runtime.
 
 ## Status
@@ -9,8 +9,11 @@ Context Broker and is intentionally not a general remote-agent or MCP runtime.
 The local foundation is runnable only through the sibling ThoughtKhoral
 platform's rootless development stack. See [the verification
 procedure](docs/verification/a2a-foundation.md). It accepts exactly the pinned
-Reference Agent and its two deterministic skills; remote admission, MCP,
-models, tools, direct storage access, and production deployment are excluded.
+Reference Agent and its two deterministic skills by default. The approved
+[Codex mediation extension](.ai/specs/how/codex-mediation.md) is implemented on
+an isolated local branch, with provider-free verification described in
+[the mediation checks](docs/verification/codex-mediation.md). It remains opt-in;
+platform activation and live provider verification are later plan tasks.
 
 The gateway pins a reviewed retained-v1 room contract revision in
 [`contracts/lock.json`](contracts/lock.json). Its authenticated internal task
@@ -26,6 +29,10 @@ bash scripts/smoke.sh
 ```
 
 For the gateway's own tests, run `cargo fmt --check` and `cargo test` here.
+Verify the independently published conversation artifact with
+`python3 scripts/check_conversation_pin.py`. Codex routing uses its own exact
+profile validators and private transport records; the deterministic validator
+retains its existing contract. The broker owns room authorization and storage.
 
 Read the [local specification index](.ai/specs/README.md), the
 [deferred capability specification](.ai/specs/what/deferred-agent-gateway.md),

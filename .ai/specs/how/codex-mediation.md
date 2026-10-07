@@ -167,3 +167,27 @@ This repository's default branch retains its prior runtime; the reviewed
 mediator revision remains on its local branch. Publication, packaged-stack
 verification and authorized live-provider checks remain pending. Full evidence
 is in the [coordinated checkpoint](https://github.com/thoughtkhoral/thought-khoral/blob/main/.ai/specs/how/codex-room-conversations-implementation-plan.md).
+
+## Safe failed-turn projection clarification (2026-10-07)
+
+JSON-RPC negative error codes are envelope metadata, parsed separately from
+strict nonnegative profile values. Duplicate/unknown envelope keys, mismatched
+RPC IDs, mixed result/error envelopes, fractional/unsafe counters, and unknown
+error strings cannot authorize success or a specific safe failure. A known
+worker rejection is forwarded only after an authenticated receipt read matches
+the requested task, conversation and generation, is terminal failed/interrupted,
+and has the same bounded profile error code with no result, acknowledgement or
+runtime binding. The same strict receipt rule applies to recovered failures.
+Transport/malformed/unknown states remain conversation_interrupted. Raw error
+text never becomes a broker update or public message; no profile artifact or
+counter validation changes.
+
+## Local main integration checkpoint — 2026-10-07
+
+The reviewed mediator at source commit
+`6c3d96b4763871b9addc9bc7223e71ee7d38abd9` is integrated into this repository's
+local `main` under the user's explicit merge authorization. It remains on the
+published v1.0 conversation profile; the unreleased v1.1 candidate is consumed
+by contracts, broker, and UI only. Fresh serial `cargo test --locked --offline`
+passed. Publication, packaged-stack verification, provider use, activation and
+push remain separate gates.
