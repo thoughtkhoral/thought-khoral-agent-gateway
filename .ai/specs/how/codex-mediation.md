@@ -9,6 +9,23 @@ Implementation follows the [plan](https://github.com/thoughtkhoral/thought-khora
 Release/tag publication, provider use and service activation require their
 separate later authorization. No completed runtime or live verification is claimed.
 
+## Current implementation and evidence — 2026-11-19
+
+The reviewed conversation mediator is on GitHub `main` and remains compatible
+with the published v1.0 profile. The defaults amendment required no mediator
+runtime change. The October provider-free mediator and composed synthetic
+results retain their exact source attribution.
+
+The [coordinated plan](https://github.com/thoughtkhoral/thought-khoral/blob/main/.ai/specs/how/codex-room-conversations-implementation-plan.md)
+records subsequent native Linux worker acceptance. That evidence closes only
+the tested worker gates and adds no new contract, broker or mediator runtime
+verification. Task 9 packaged room-stack, rendered-browser and live-provider
+acceptance, v1.1 artifact publication and production/release acceptance remain
+open. Approval-era status wording and dated checkpoints below retain their
+historical scope; later integration/publication checkpoints supersede earlier
+local-only or unmerged statements. No runtime tests were rerun for this
+Markdown synchronization.
+
 ## Governing sources
 
 - [Local requirements](../what/codex-mediation.md)

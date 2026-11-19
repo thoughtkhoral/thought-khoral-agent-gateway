@@ -9,6 +9,22 @@ See the [root specification index](https://github.com/thoughtkhoral/thought-khor
 
 For the coordinated Codex conversation status across all projects, see the [shared status guide](https://github.com/thoughtkhoral/thought-khoral/blob/main/docs/codex-conversation-status.md).
 
+## Current verification boundary — 2026-11-19
+
+The reviewed conversation mediator is on GitHub `main` and remains compatible
+with the published v1.0 profile. The defaults amendment required no mediator
+runtime change. The October provider-free mediator and composed synthetic
+results retain their exact source attribution.
+
+The [owning conversation design](how/codex-mediation.md) and
+[coordinated plan](https://github.com/thoughtkhoral/thought-khoral/blob/main/.ai/specs/how/codex-room-conversations-implementation-plan.md)
+are authoritative for implementation and evidence. The later native Linux CI
+closes only the worker's tested build/runtime/package-policy gates. It does not
+retest this repository or close Task 9 packaged room-stack, rendered-browser,
+live-provider, v1.1 publication or production/release acceptance. Earlier dated
+checkpoints below preserve the state at their recording time; their local-only,
+unmerged and pending-push wording is historical.
+
 ## Local areas
 
 - [What: deferred agent gateway (superseded for the local foundation)](what/deferred-agent-gateway.md)
