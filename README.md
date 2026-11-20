@@ -1,5 +1,7 @@
 # ThoughtKhoral agent gateway
 
+[Project documentation](docs/README.md) · [Documentation requirements](.ai/specs/what/public-documentation.md)
+
 ## Current workspace context — 2026-11-20
 
 Conversation v1.1 is published and the released broker/UI consumers and packaged profile are verified on local branches. This mediator retains its compatible published-v1.0 pin and runtime baseline `48a72bc`; no new mediator code or authority is introduced. Native/package/synthetic preparation evidence does not close assembled-stack/private-DNS/browser/live-provider gates. The deterministic reference-agent path and deferred remote/MCP boundary remain unchanged.
