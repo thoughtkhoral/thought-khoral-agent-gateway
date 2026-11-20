@@ -1,5 +1,17 @@
 # ThoughtKhoral agent gateway
 
+## Current workspace context — 2026-11-20
+
+Conversation v1.1 is published and the released broker/UI consumers and packaged profile are verified on local branches. This mediator retains its compatible published-v1.0 pin and runtime baseline `48a72bc`; no new mediator code or authority is introduced. Native/package/synthetic preparation evidence does not close assembled-stack/private-DNS/browser/live-provider gates. The deterministic reference-agent path and deferred remote/MCP boundary remain unchanged.
+
+Runtime source and contract pins are unchanged. Exact clean pinned-source
+snapshots were retained before this documentation-only checkout advanced.
+
+Derived from the [local specification index](.ai/specs/README.md) and
+[root workspace authority](https://github.com/thoughtkhoral/thought-khoral/blob/main/.ai/specs/how/workspace-state.md).
+The cited tests retain their original source identities; this documentation
+refresh adds no activation, publication or runtime acceptance.
+
 `thought-khoral-agent-gateway` is the mediated boundary between governed rooms
 and admitted local A2A agents. It uses the Room
 Context Broker and is intentionally not a general remote-agent or MCP runtime.
