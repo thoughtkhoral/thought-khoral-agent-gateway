@@ -1,5 +1,18 @@
 # Codex Mediation — implementation design
 
+## Current workspace state — 2026-11-20
+
+Conversation v1.1 is published and the released broker/UI consumers and packaged profile are verified on local branches. This mediator retains its compatible published-v1.0 pin and runtime baseline `48a72bc`; no new mediator code or authority is introduced. Native/package/synthetic preparation evidence does not close assembled-stack/private-DNS/browser/live-provider gates. The deterministic reference-agent path and deferred remote/MCP boundary remain unchanged.
+
+Runtime source and contract pins are unchanged. Exact clean pinned-source
+snapshots were retained before this documentation-only checkout advanced.
+
+See the [root workspace authority](https://github.com/thoughtkhoral/thought-khoral/blob/main/.ai/specs/how/workspace-state.md) for exact source/release
+identities, preserved source snapshots and remaining gates. Documentation-only
+HEADs are not substitutions for frozen acceptance commits. Earlier dated
+checkpoints retain their historical evidence; no runtime suite was rerun for
+this prose refresh.
+
 ## Status
 
 Approved by the project maintainer in the Codex working session on 2026-10-05,
@@ -9,7 +22,9 @@ Implementation follows the [plan](https://github.com/thoughtkhoral/thought-khora
 Release/tag publication, provider use and service activation require their
 separate later authorization. No completed runtime or live verification is claimed.
 
-## Current implementation and evidence — 2026-11-19
+<a id="current-implementation-and-evidence--2026-11-19"></a>
+
+## Historical implementation and evidence — 2026-11-19
 
 The reviewed conversation mediator is on GitHub `main` and remains compatible
 with the published v1.0 profile. The defaults amendment required no mediator
